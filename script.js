@@ -1,0 +1,2233 @@
+/* ==========================================================================
+   Lead Performance 360 — Zoho CRM widget
+   --------------------------------------------------------------------------
+   Contents
+     1. Config, palette & view state
+     2. Time helpers (YTD axis — auto-extends as months pass)
+     3. Formatting
+     4. Data layer  <-- WIRE ZOHO ANALYTICS HERE (§ 4.2)
+     5. Chart engine (hand-rolled SVG: no CDN, CSP-safe inside CRM)
+        5.1 primitives   5.2 dispatcher    5.3 overlay    5.4 small multiples
+        5.5 interaction (hover · brush-zoom · drill)      5.6 tooltip
+     6. Renderers — tiles, meters, cards, tables, sections
+     7. Drill-through panel
+     8. Boot & Zoho embedded-app wiring
+
+   Charting rules this file holds itself to:
+     · one y-scale per plot — never a dual axis. Revenue/Customers/Leads have
+       incompatible units, so § 6.6 renders them as SMALL MULTIPLES, not as
+       three lines sharing one axis.
+     · categorical hues assigned by entity, never by rank — muting a series
+       never repaints the survivors.
+     · every 2+ series plot has a legend; every plot has a table view.
+     · analysis overlays (compare / target / trend) are secondary ink: thinner,
+       dashed, and behind the actuals. They never outweigh the data.
+   ========================================================================== */
+
+(function () {
+  "use strict";
+
+  /* ======================================================================
+     1. Config, palette & view state
+     ====================================================================== */
+
+  var CONFIG = {
+    /* Overridden from the org profile on boot when the SDK is available. */
+    currency: "$",
+
+    /* How many past years the Year filter offers. */
+    yearsBack: 3,
+
+    /* Set false once § 4.2 is wired to real Analytics data. */
+    useMockData: true,
+
+    /* Drill-through: fetch the records behind a point. Falls back to sample
+       rows whenever the CRM API is unavailable (e.g. opened standalone). */
+    enableDrill: true,
+
+    /* Rows to pull per drill-through. */
+    drillLimit: 8
+  };
+
+  /**
+   * Entity -> categorical slot. Colour follows the ENTITY, never its rank in
+   * the series list, so muting one series never repaints the rest.
+   *
+   * Only slots 1-3 are used: {blue, orange, aqua} is validated all-pairs on
+   * the white card surface (worst CVD dE 10.5, normal-vision dE 22.1).
+   * Slot 4 (violet) is deliberately NOT used beside slot 1 (blue) — that pair
+   * measures dE 2.1 under deuteranopia and is indistinguishable.
+   */
+  var HUE = {
+    revenue:     "--series-1",
+    customers:   "--series-2",
+    leads:       "--series-3",
+    booked:      "--series-1",
+    churned:     "--series-2",
+    pse:         "--series-3",
+    guided:      "--series-1",
+    selfService: "--series-2"
+  };
+
+  /**
+   * View state — what the analysis toggles and the brush are showing.
+   * `range` is a window into the FULL month axis, so zoom survives a
+   * re-render and stays linked across every month-based chart.
+   */
+  var VIEW = {
+    compare: false,   // prior-year ghost line
+    target:  false,   // quota reference line + shortfall wash
+    trend:   false,   // least-squares fit over the visible window
+    range:   null     // [startIndex, endIndex] into the full month axis
+  };
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement)
+      .getPropertyValue(name).trim() || "#888";
+  }
+
+  /* ======================================================================
+     2. Time helpers
+     ====================================================================== */
+
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  var QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
+
+  /**
+   * The YTD month axis. For the current year this is Jan -> the current month;
+   * for any past year it is the full Jan -> Dec. Nothing is hard-coded, so the
+   * axis grows on its own as each new month begins.
+   */
+  function ytdMonths(year) {
+    var now = new Date();
+    var last = (year === now.getFullYear()) ? now.getMonth() : 11;
+    return MONTHS.slice(0, last + 1);
+  }
+
+  function currentQuarter() {
+    return Math.floor(new Date().getMonth() / 3) + 1;
+  }
+
+  function periodLabel(year) {
+    var months = ytdMonths(year);
+    return "Jan – " + months[months.length - 1] + " " + year + "  ·  year to date";
+  }
+
+  /** The brush window, clamped to the months that actually exist. */
+  function windowFor(year) {
+    var all = ytdMonths(year);
+    if (!VIEW.range) return { start: 0, end: all.length - 1, all: all };
+    var s = Math.max(0, Math.min(all.length - 1, VIEW.range[0]));
+    var e = Math.max(s, Math.min(all.length - 1, VIEW.range[1]));
+    return { start: s, end: e, all: all };
+  }
+
+  /* ======================================================================
+     3. Formatting
+     ====================================================================== */
+
+  function fmtCount(v) {
+    if (v == null || !isFinite(v)) return "–";
+    if (Math.abs(v) >= 1e6) return trim(v / 1e6) + "M";
+    if (Math.abs(v) >= 10000) return trim(v / 1e3) + "K";
+    return Math.round(v).toLocaleString("en-US");
+  }
+
+  function fmtCurrency(v) {
+    if (v == null || !isFinite(v)) return "–";
+    var sign = v < 0 ? "-" : "";
+    var a = Math.abs(v);
+    if (a >= 1e6) return sign + CONFIG.currency + trim(a / 1e6) + "M";
+    if (a >= 1e3) return sign + CONFIG.currency + trim(a / 1e3) + "K";
+    return sign + CONFIG.currency + Math.round(a).toLocaleString("en-US");
+  }
+
+  function fmtPercent(v) {
+    if (v == null || !isFinite(v)) return "–";
+    return (Math.round(v * 10) / 10) + "%";
+  }
+
+  function fmtSignedPct(v) {
+    if (v == null || !isFinite(v)) return null;
+    var r = Math.round(v * 10) / 10;
+    return (r > 0 ? "+" : "") + r + "%";
+  }
+
+  function trim(n) {
+    var r = Math.round(n * 10) / 10;
+    return (r % 1 === 0 ? r.toFixed(0) : r.toFixed(1));
+  }
+
+  function formatter(kind) {
+    if (kind === "currency") return fmtCurrency;
+    if (kind === "percent") return fmtPercent;
+    return fmtCount;
+  }
+
+  /* ======================================================================
+     4. Data layer
+     ====================================================================== */
+
+  /* ---- 4.1 The shape every renderer expects ---------------------------
+     Return exactly this from § 4.2 and the whole dashboard lights up.
+     Every `months`-keyed array must be parallel to `ytdMonths(year)`; short
+     arrays are padded with null (a null breaks the line rather than
+     plotting a zero), long ones are truncated.
+
+     {
+       year, scope,
+       ytd:  { newProspects, csProspects, newCustomers, csCustomers,
+               totalCustomers, convPct, under5kCustomers, over5kCustomers,
+               newRevenue, csRevenue, totalRevenue },
+       prev: { ...same keys, prior-year same-period, drives the tile deltas },
+
+       monthly:   { revenue:[], customers:[], leads:[] },
+       quarterly: { revenue:[], customers:[], leads:[] },      // 4 entries
+
+       // Prior-year actuals for the SAME periods — drives "compare".
+       // Omit any branch you have no history for; its ghost line is skipped.
+       lastYear: {
+         monthly:   { revenue:[], customers:[], leads:[] },
+         quarterly: { revenue:[], customers:[], leads:[] },
+         bookings:  { booked:[], churned:[] },
+         pse:       { pse:[], revenue:[], customers:[] },
+         channel:   { guidedCustomers:[], selfServeCustomers:[],
+                      guidedRevenue:[], selfServeRevenue:[] }
+       },
+
+       // Quota per period. A number applies to every period; an array is
+       // per-period. Omit a key to draw no target line for that series.
+       targets: {
+         monthlyRevenue:   [] | number,
+         monthlyCustomers: [] | number,
+         quarterlyRevenue: [] | number,
+         pseClosureRate:   number
+       },
+
+       pipeline:  { qualifiedLostCustomers, lostRevenue,
+                    pipelineRevenueQuarter, pipelineRevenueYear,
+                    forecastRevenue, attainedRevenue },
+       bookings:  { booked:[], churned:[] },
+       pse:       { pse:[], revenue:[], customers:[] },        // percentages
+       channel:   { guidedCustomers:[], selfServeCustomers:[],
+                    guidedRevenue:[],  selfServeRevenue:[] }
+     }
+  ------------------------------------------------------------------------ */
+
+  /* ---- 4.2 Zoho Analytics adapter -------------------------------------
+
+     Wire this up to your Analytics workspace. The usual route from a CRM
+     widget is a CRM Connection to the Analytics API, invoked server-side so
+     the token never reaches the browser:
+
+       var res = await ZOHO.CRM.CONNECTION.invoke("<connection_link_name>", {
+         url: "https://analyticsapi.zoho.com/restapi/v2/workspaces/"
+            + "<WORKSPACE_ID>/views/<VIEW_ID>/data",
+         method: "GET",
+         param_type: 1,
+         parameters: {
+           CONFIG: JSON.stringify({
+             criteria: '"Year" = ' + year + ' and "Scope" = \'' + scope + '\'',
+             responseFormat: "json"
+           })
+         },
+         headers: { "ZANALYTICS-ORGID": "<ORG_ID>" }
+       });
+       return mapAnalyticsRows(res.details.statusMessage.data, year);
+
+     Then map the returned columns onto the § 4.1 shape. Keep the mapping in
+     `mapAnalyticsRows` so the renderers never learn your column names.
+  ---------------------------------------------------------------------- */
+
+  function fetchData(year, scope) {
+    if (CONFIG.useMockData) {
+      return Promise.resolve(mockData(year, scope));
+    }
+
+    // TODO: replace with the ZOHO.CRM.CONNECTION.invoke call sketched above.
+    return Promise.reject(new Error(
+      "Analytics is not wired yet — see script.js § 4.2"
+    ));
+  }
+
+  /**
+   * Align an incoming array to the axis: truncate if long, pad with null if
+   * short. Nulls render as a gap, never as a zero.
+   */
+  function align(arr, len) {
+    var out = [];
+    for (var i = 0; i < len; i++) {
+      var v = (arr && arr[i] != null && isFinite(arr[i])) ? Number(arr[i]) : null;
+      out.push(v);
+    }
+    return out;
+  }
+
+  /** Slice an aligned array down to the brush window. */
+  function slice(arr, win) {
+    return arr ? arr.slice(win.start, win.end + 1) : null;
+  }
+
+  /** A quota that may be a scalar or a per-period array -> aligned array. */
+  function targetArray(t, len) {
+    if (t == null) return null;
+    if (typeof t === "number") {
+      var out = [];
+      for (var i = 0; i < len; i++) out.push(t);
+      return out;
+    }
+    return align(t, len);
+  }
+
+  /* ---- 4.3 Mock data ---------------------------------------------------
+     Deterministic (seeded) so the dashboard looks identical on every reload
+     and design changes are easy to eyeball. Delete once § 4.2 is live.
+  ---------------------------------------------------------------------- */
+
+  function seeded(seed) {
+    var s = seed;
+    return function () {
+      s = (s * 1103515245 + 12345) % 2147483648;
+      return s / 2147483648;
+    };
+  }
+
+  function mockData(year, scope) {
+    var months = ytdMonths(year);
+    var n = months.length;
+    var rnd = seeded(year * 977 + scope.length * 13);
+    var mult = scope === "mine" ? 0.24 : scope === "team" ? 0.62 : 1;
+
+    function series(base, growth, jitter) {
+      var out = [];
+      for (var i = 0; i < n; i++) {
+        var v = base * (1 + growth * i) * (1 + (rnd() - 0.5) * jitter);
+        out.push(Math.max(0, Math.round(v * mult)));
+      }
+      return out;
+    }
+
+    /* prior-year twin: same shape, scaled down, independently jittered */
+    function ghost(arr, factor) {
+      return arr.map(function (v, i) {
+        return Math.max(0, Math.round(v * factor * (1 + (rnd() - 0.5) * 0.16) -
+          (i * v * 0.004)));
+      });
+    }
+
+    var revenue   = series(420000, 0.045, 0.18);
+    var customers = series(64, 0.05, 0.2);
+    var leads     = series(310, 0.035, 0.22);
+
+    var sum = function (a) { return a.reduce(function (x, y) { return x + y; }, 0); };
+
+    var newCustomers = Math.round(sum(customers) * 0.62);
+    var csCustomers  = sum(customers) - newCustomers;
+    var newRevenue   = Math.round(sum(revenue) * 0.58);
+    var csRevenue    = sum(revenue) - newRevenue;
+    var newProspects = Math.round(sum(leads) * 0.66);
+    var csProspects  = sum(leads) - newProspects;
+    var totalCust    = newCustomers + csCustomers;
+
+    /* Quarterly: real quarters only — a quarter that has not started is null. */
+    var q = [];
+    var lastQ = (year === new Date().getFullYear()) ? currentQuarter() : 4;
+    for (var i = 0; i < 4; i++) q.push(i < lastQ ? i : null);
+
+    function quarterly(base, growth) {
+      return q.map(function (idx) {
+        return idx == null ? null
+          : Math.round(base * (1 + growth * idx) * (1 + (rnd() - 0.5) * 0.12) * mult);
+      });
+    }
+
+    var qRevenue   = quarterly(1250000, 0.09);
+    var qCustomers = quarterly(196, 0.1);
+    var qLeads     = quarterly(940, 0.07);
+
+    var booked  = series(88, 0.04, 0.16);
+    var churned = series(19, -0.02, 0.3);
+
+    var psePse  = series(64, 0.012, 0.1).map(function (v) { return Math.min(100, v / mult); });
+    var pseRev  = series(48, 0.02, 0.12).map(function (v) { return Math.min(100, v / mult); });
+    var pseCust = series(37, 0.015, 0.14).map(function (v) { return Math.min(100, v / mult); });
+
+    var guidedC = series(52, 0.05, 0.15);
+    var selfC   = series(31, 0.08, 0.18);
+    var guidedR = series(295000, 0.045, 0.15);
+    var selfR   = series(118000, 0.075, 0.2);
+
+    var attained = Math.round(sum(revenue));
+    var forecast = Math.round(attained / 0.82);
+
+    return {
+      year: year,
+      scope: scope,
+
+      ytd: {
+        newProspects:     newProspects,
+        csProspects:      csProspects,
+        newCustomers:     newCustomers,
+        csCustomers:      csCustomers,
+        totalCustomers:   totalCust,
+        convPct:          (totalCust / (newProspects + csProspects)) * 100,
+        under5kCustomers: Math.round(totalCust * 0.71),
+        over5kCustomers:  totalCust - Math.round(totalCust * 0.71),
+        newRevenue:       newRevenue,
+        csRevenue:        csRevenue,
+        totalRevenue:     newRevenue + csRevenue
+      },
+
+      prev: {
+        newProspects:     Math.round(newProspects * 0.88),
+        csProspects:      Math.round(csProspects * 1.06),
+        newCustomers:     Math.round(newCustomers * 0.91),
+        csCustomers:      Math.round(csCustomers * 0.97),
+        totalCustomers:   Math.round(totalCust * 0.93),
+        convPct:          (totalCust / (newProspects + csProspects)) * 100 * 0.95,
+        under5kCustomers: Math.round(totalCust * 0.71 * 0.9),
+        over5kCustomers:  Math.round((totalCust - Math.round(totalCust * 0.71)) * 1.04),
+        newRevenue:       Math.round(newRevenue * 0.86),
+        csRevenue:        Math.round(csRevenue * 1.02),
+        totalRevenue:     Math.round((newRevenue + csRevenue) * 0.92)
+      },
+
+      monthly:   { revenue: revenue, customers: customers, leads: leads },
+      quarterly: { revenue: qRevenue, customers: qCustomers, leads: qLeads },
+
+      lastYear: {
+        monthly: {
+          revenue:   ghost(revenue, 0.87),
+          customers: ghost(customers, 0.9),
+          leads:     ghost(leads, 0.94)
+        },
+        quarterly: {
+          revenue:   qRevenue.map(function (v) { return v == null ? null : Math.round(v * 0.88); }),
+          customers: qCustomers.map(function (v) { return v == null ? null : Math.round(v * 0.92); }),
+          leads:     qLeads.map(function (v) { return v == null ? null : Math.round(v * 0.95); })
+        },
+        bookings: { booked: ghost(booked, 0.89), churned: ghost(churned, 1.18) },
+        pse: {
+          pse:       ghost(psePse, 0.93),
+          revenue:   ghost(pseRev, 0.9),
+          customers: ghost(pseCust, 0.95)
+        },
+        channel: {
+          guidedCustomers:    ghost(guidedC, 0.93),
+          selfServeCustomers: ghost(selfC, 0.74),
+          guidedRevenue:      ghost(guidedR, 0.91),
+          selfServeRevenue:   ghost(selfR, 0.7)
+        }
+      },
+
+      targets: {
+        monthlyRevenue:   Math.round(520000 * mult),
+        monthlyCustomers: Math.round(78 * mult),
+        quarterlyRevenue: Math.round(1500000 * mult),
+        pseClosureRate:   70
+      },
+
+      pipeline: {
+        qualifiedLostCustomers: Math.round(41 * mult),
+        lostRevenue:            Math.round(386000 * mult),
+        pipelineRevenueQuarter: Math.round(1420000 * mult),
+        pipelineRevenueYear:    Math.round(5180000 * mult),
+        forecastRevenue:        forecast,
+        attainedRevenue:        attained
+      },
+      prevPipeline: {
+        qualifiedLostCustomers: Math.round(47 * mult),
+        lostRevenue:            Math.round(412000 * mult)
+      },
+
+      bookings: { booked: booked, churned: churned },
+      pse:      { pse: psePse, revenue: pseRev, customers: pseCust },
+      channel:  {
+        guidedCustomers: guidedC, selfServeCustomers: selfC,
+        guidedRevenue: guidedR,  selfServeRevenue: selfR
+      }
+    };
+  }
+
+  /* ======================================================================
+     5. Chart engine
+     ====================================================================== */
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  /* ---- 5.1 Primitives -------------------------------------------------- */
+
+  function el(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    for (var k in attrs) {
+      if (Object.prototype.hasOwnProperty.call(attrs, k)) {
+        node.setAttribute(k, attrs[k]);
+      }
+    }
+    return node;
+  }
+
+  /** Axis ticks rounded to clean numbers. */
+  function niceScale(max, tickCount) {
+    if (!isFinite(max) || max <= 0) {
+      return { max: 1, ticks: [0, 0.5, 1] };
+    }
+    var raw = max / tickCount;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var norm = raw / mag;
+    var step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10;
+    step *= mag;
+
+    var niceMax = Math.ceil(max / step) * step;
+    var ticks = [];
+    for (var v = 0; v <= niceMax + step * 1e-6; v += step) {
+      ticks.push(Math.round(v * 1e6) / 1e6);
+    }
+    return { max: niceMax, ticks: ticks };
+  }
+
+  /**
+   * Ceiling for a plot. Includes whatever overlays are switched on, so a
+   * target line above the data or a taller prior year never gets clipped.
+   */
+  function plotMax(list) {
+    var m = 0;
+    list.forEach(function (s) {
+      var pools = [s.values];
+      if (VIEW.compare && s.compare) pools.push(s.compare);
+      if (VIEW.target && s.target) pools.push(s.target);
+      pools.forEach(function (arr) {
+        arr.forEach(function (v) { if (v != null && v > m) m = v; });
+      });
+    });
+    return m;
+  }
+
+  /**
+   * Build the SVG path for a series, breaking the line at nulls so a missing
+   * month reads as a gap instead of a plunge to zero.
+   */
+  function linePath(values, x, y) {
+    var d = "";
+    var pen = false;
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] == null) { pen = false; continue; }
+      d += (pen ? "L" : "M") + x(i).toFixed(2) + " " + y(values[i]).toFixed(2) + " ";
+      pen = true;
+    }
+    return d.trim();
+  }
+
+  function areaPath(values, x, y, baseY) {
+    var segs = [];
+    var run = [];
+    values.forEach(function (v, i) {
+      if (v == null) { if (run.length) segs.push(run); run = []; }
+      else run.push(i);
+    });
+    if (run.length) segs.push(run);
+
+    return segs.filter(function (s) { return s.length > 1; }).map(function (s) {
+      var d = "M" + x(s[0]) + " " + baseY;
+      s.forEach(function (i) { d += "L" + x(i).toFixed(2) + " " + y(values[i]).toFixed(2); });
+      d += "L" + x(s[s.length - 1]) + " " + baseY + "Z";
+      return d;
+    }).join(" ");
+  }
+
+  /**
+   * Band between an actual line and its target, drawn only where the actual
+   * falls SHORT. Crossings are interpolated so the wash starts exactly where
+   * the lines cross, not at the next whole month.
+   */
+  function shortfallPath(values, target, x, y) {
+    var out = "";
+    for (var i = 0; i < values.length - 1; i++) {
+      var a0 = values[i], a1 = values[i + 1];
+      var t0 = target[i], t1 = target[i + 1];
+      if (a0 == null || a1 == null || t0 == null || t1 == null) continue;
+
+      var d0 = t0 - a0, d1 = t1 - a1;      // positive = below target
+      if (d0 <= 0 && d1 <= 0) continue;
+
+      var xa = x(i), xb = x(i + 1);
+      var pts;
+
+      if (d0 > 0 && d1 > 0) {
+        pts = [[xa, y(a0)], [xb, y(a1)], [xb, y(t1)], [xa, y(t0)]];
+      } else {
+        /* one end is above target — split at the crossing */
+        var f = d0 / (d0 - d1);
+        var xc = xa + (xb - xa) * f;
+        var yc = y(a0 + (a1 - a0) * f);
+        pts = d0 > 0
+          ? [[xa, y(a0)], [xc, yc], [xa, y(t0)]]
+          : [[xc, yc], [xb, y(a1)], [xb, y(t1)]];
+      }
+
+      out += "M" + pts.map(function (p) {
+        return p[0].toFixed(2) + " " + p[1].toFixed(2);
+      }).join("L") + "Z ";
+    }
+    return out.trim();
+  }
+
+  /** Least-squares fit over the non-null points; null if there are too few. */
+  function linearFit(values) {
+    var n = 0, sx = 0, sy = 0, sxy = 0, sxx = 0;
+    values.forEach(function (v, i) {
+      if (v == null) return;
+      n++; sx += i; sy += v; sxy += i * v; sxx += i * i;
+    });
+    if (n < 3) return null;
+    var denom = n * sxx - sx * sx;
+    if (denom === 0) return null;
+    var m = (n * sxy - sx * sy) / denom;
+    return { m: m, b: (sy - m * sx) / n };
+  }
+
+  function lastIndex(values) {
+    for (var i = values.length - 1; i >= 0; i--) if (values[i] != null) return i;
+    return -1;
+  }
+
+  /* ---- 5.2 Dispatcher -------------------------------------------------- */
+
+  function draw(host) {
+    var spec = host.__spec;
+    if (!spec) return;
+
+    var width = host.clientWidth || 520;
+    if (width < 80) return;
+
+    host.textContent = "";
+
+    var muted = host.__muted || {};
+    var live = spec.series.filter(function (s) {
+      return !muted[s.id] && s.values.some(function (v) { return v != null; });
+    });
+
+    if (!live.length || !spec.labels.length) {
+      var empty = document.createElement("div");
+      empty.className = "lp-empty";
+      empty.textContent = live.length ? "No data for this period" : "All series hidden";
+      host.appendChild(empty);
+      return;
+    }
+
+    if (spec.mode === "panels") drawPanels(host, spec, live, width);
+    else drawOverlay(host, spec, live, width);
+  }
+
+  /* ---- 5.3 Overlay: several series, ONE shared y-scale ----------------
+     Only ever called with series that share a unit. Mixed units go to
+     drawPanels instead — this codebase has no dual-axis path.
+  ---------------------------------------------------------------------- */
+
+  function drawOverlay(host, spec, live, width) {
+    var fmt = formatter(spec.valueFormat);
+    var pad = { t: 12, r: 64, b: 24, l: 52 };
+    var height = 210;
+    var plotW = width - pad.l - pad.r;
+    var plotH = height - pad.t - pad.b;
+    var n = spec.labels.length;
+
+    var scale = niceScale(plotMax(live), 4);
+    var x = function (i) { return pad.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1)); };
+    var y = function (v) { return pad.t + plotH - (v / scale.max) * plotH; };
+
+    var svg = el("svg", {
+      viewBox: "0 0 " + width + " " + height,
+      width: width, height: height, tabindex: "0",
+      role: "img", "aria-label": spec.ariaLabel || spec.title || "chart"
+    });
+
+    /* gridlines + y ticks — hairline, solid, recessive */
+    scale.ticks.forEach(function (t) {
+      svg.appendChild(el("line", {
+        x1: pad.l, x2: pad.l + plotW, y1: y(t), y2: y(t),
+        stroke: t === 0 ? cssVar("--baseline") : cssVar("--grid"), "stroke-width": 1
+      }));
+      var lbl = el("text", {
+        x: pad.l - 8, y: y(t) + 3.5, "text-anchor": "end",
+        fill: cssVar("--z-ink-3"), "font-size": "10"
+      });
+      lbl.style.fontVariantNumeric = "tabular-nums";
+      lbl.textContent = fmt(t);
+      svg.appendChild(lbl);
+    });
+
+    /* x labels — thinned so they never collide */
+    var every = Math.ceil(n / Math.max(2, Math.floor(plotW / 42)));
+    spec.labels.forEach(function (label, i) {
+      if (i % every !== 0 && i !== n - 1) return;
+      var t = el("text", {
+        x: x(i), y: pad.t + plotH + 15, "text-anchor": "middle",
+        fill: cssVar("--z-ink-3"), "font-size": "10"
+      });
+      t.textContent = label;
+      svg.appendChild(t);
+    });
+
+    /* --- analysis layer, behind the actuals --- */
+
+    if (VIEW.target) {
+      live.forEach(function (s) {
+        if (!s.target) return;
+        svg.appendChild(el("path", {
+          d: shortfallPath(s.values, s.target, x, y),
+          fill: cssVar("--bad"), "fill-opacity": ".09", stroke: "none"
+        }));
+        svg.appendChild(el("path", {
+          d: linePath(s.target, x, y),
+          fill: "none", stroke: cssVar(s.hue), "stroke-width": 1.5,
+          "stroke-dasharray": "1 4", "stroke-opacity": ".9", "stroke-linecap": "round"
+        }));
+      });
+    }
+
+    if (VIEW.compare) {
+      live.forEach(function (s) {
+        if (!s.compare) return;
+        svg.appendChild(el("path", {
+          d: linePath(s.compare, x, y),
+          fill: "none", stroke: cssVar(s.hue), "stroke-width": 1.5,
+          "stroke-opacity": ".4", "stroke-dasharray": "6 3",
+          "stroke-linecap": "round", "stroke-linejoin": "round"
+        }));
+      });
+    }
+
+    if (VIEW.trend) {
+      live.forEach(function (s) {
+        var fit = linearFit(s.values);
+        if (!fit) return;
+        var y0 = Math.max(0, Math.min(scale.max, fit.b));
+        var y1 = Math.max(0, Math.min(scale.max, fit.m * (n - 1) + fit.b));
+        svg.appendChild(el("line", {
+          x1: x(0), y1: y(y0), x2: x(n - 1), y2: y(y1),
+          stroke: cssVar(s.hue), "stroke-width": 1.5, "stroke-opacity": ".5",
+          "stroke-dasharray": "10 5", "stroke-linecap": "round"
+        }));
+      });
+    }
+
+    /* a single series gets an area wash; multiples stay as clean lines */
+    if (live.length === 1) {
+      svg.appendChild(el("path", {
+        d: areaPath(live[0].values, x, y, pad.t + plotH),
+        fill: cssVar(live[0].hue), "fill-opacity": ".10", stroke: "none"
+      }));
+    }
+
+    live.forEach(function (s) {
+      svg.appendChild(el("path", {
+        d: linePath(s.values, x, y),
+        fill: "none", stroke: cssVar(s.hue), "stroke-width": 2,
+        "stroke-linecap": "round", "stroke-linejoin": "round"
+      }));
+    });
+
+    /* end dots — 2px surface ring so crossings stay legible */
+    var ends = [];
+    live.forEach(function (s) {
+      var i = lastIndex(s.values);
+      if (i < 0) return;
+      svg.appendChild(el("circle", {
+        cx: x(i), cy: y(s.values[i]), r: 4,
+        fill: cssVar(s.hue), stroke: cssVar("--z-surface"), "stroke-width": 2
+      }));
+      ends.push({ s: s, y: y(s.values[i]), v: s.values[i] });
+    });
+
+    /* Direct end-labels, but only where they will not collide. When lines
+       converge we drop the labels and let the legend + tooltip carry it —
+       nudging them apart would detach them from their lines. */
+    ends.sort(function (a, b) { return a.y - b.y; });
+    var roomy = ends.every(function (e, i) {
+      return i === 0 || (e.y - ends[i - 1].y) >= 13;
+    });
+    if (roomy) {
+      ends.forEach(function (e) {
+        var t = el("text", {
+          x: pad.l + plotW + 9, y: e.y + 3.5,
+          fill: cssVar("--z-ink-2"), "font-size": "10.5", "font-weight": "600"
+        });
+        t.textContent = fmt(e.v);
+        svg.appendChild(t);
+      });
+    }
+
+    attachInteractions(svg, spec, live, {
+      x: x, n: n, pad: pad, plotW: plotW, plotH: plotH, fmt: fmt, yShared: y
+    });
+
+    host.appendChild(svg);
+  }
+
+  /* ---- 5.4 Panels: small multiples, one scale EACH --------------------
+     The honest answer to "Revenue, Customers and Leads on one chart": three
+     stacked panels sharing an x-axis, each with its own y-scale. One
+     crosshair spans all three, so the reader still compares at a glance.
+  ---------------------------------------------------------------------- */
+
+  function drawPanels(host, spec, live, width) {
+    var headH = 15, plotH = 52, gapH = 14, axisH = 20;
+    var pad = { t: 6, r: 14, l: 52 };
+    var plotW = width - pad.l - pad.r;
+    var n = spec.labels.length;
+    var height = pad.t + live.length * (headH + plotH) + (live.length - 1) * gapH + axisH;
+
+    var x = function (i) { return pad.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1)); };
+
+    var svg = el("svg", {
+      viewBox: "0 0 " + width + " " + height,
+      width: width, height: height, tabindex: "0",
+      role: "img", "aria-label": spec.ariaLabel || spec.title || "chart"
+    });
+
+    var panels = [];
+
+    live.forEach(function (s, pi) {
+      var top = pad.t + pi * (headH + plotH + gapH);
+      var plotTop = top + headH;
+      var fmt = formatter(s.format || spec.valueFormat);
+      /* 3 candidate ticks lands on a tighter ceiling than 2, so a short panel
+         spends its height on the line instead of on empty headroom. */
+      var scale = niceScale(plotMax([s]), 3);
+      var y = function (v) { return plotTop + plotH - (v / scale.max) * plotH; };
+
+      panels.push({ s: s, y: y, fmt: fmt, top: plotTop });
+
+      /* panel header: line-key + name on the left, latest value on the right */
+      svg.appendChild(el("rect", {
+        x: pad.l, y: top + 6, width: 10, height: 2, rx: 1, fill: cssVar(s.hue)
+      }));
+      var name = el("text", {
+        x: pad.l + 16, y: top + 10.5,
+        fill: cssVar("--z-ink-2"), "font-size": "10.5", "font-weight": "500"
+      });
+      name.textContent = s.name;
+      svg.appendChild(name);
+
+      var li = lastIndex(s.values);
+      if (li >= 0) {
+        var headBits = [fmt(s.values[li])];
+
+        /* headline context: YoY when comparing, attainment when targeting */
+        if (VIEW.compare && s.compare && s.compare[li] != null && s.compare[li] !== 0) {
+          var yoy = fmtSignedPct(((s.values[li] - s.compare[li]) / Math.abs(s.compare[li])) * 100);
+          if (yoy) headBits.push(yoy + " YoY");
+        } else if (VIEW.target && s.target && s.target[li]) {
+          headBits.push(Math.round((s.values[li] / s.target[li]) * 100) + "% of target");
+        }
+
+        var val = el("text", {
+          x: pad.l + plotW, y: top + 10.5, "text-anchor": "end",
+          fill: cssVar("--z-ink"), "font-size": "11", "font-weight": "600"
+        });
+        val.textContent = headBits[0];
+        svg.appendChild(val);
+
+        if (headBits[1]) {
+          /* The SVG is still detached here, so getComputedTextLength() would
+             return 0 and stack the two labels. Reserve a fixed 58px gutter
+             instead — values are compacted ($1.2M / 12.9K), so they never
+             run past it. */
+          var ctx = el("text", {
+            x: pad.l + plotW - 58, y: top + 10.5, "text-anchor": "end",
+            fill: cssVar("--z-ink-3"), "font-size": "10"
+          });
+          ctx.textContent = headBits[1];
+          svg.appendChild(ctx);
+        }
+      }
+
+      /* baseline + a single mid gridline keeps each panel readable but quiet */
+      [0, scale.max].forEach(function (t) {
+        svg.appendChild(el("line", {
+          x1: pad.l, x2: pad.l + plotW, y1: y(t), y2: y(t),
+          stroke: t === 0 ? cssVar("--baseline") : cssVar("--grid"), "stroke-width": 1
+        }));
+      });
+
+      var tick = el("text", {
+        x: pad.l - 8, y: y(scale.max) + 3.5, "text-anchor": "end",
+        fill: cssVar("--z-ink-3"), "font-size": "9.5"
+      });
+      tick.textContent = fmt(scale.max);
+      svg.appendChild(tick);
+
+      /* --- analysis layer --- */
+      if (VIEW.target && s.target) {
+        svg.appendChild(el("path", {
+          d: shortfallPath(s.values, s.target, x, y),
+          fill: cssVar("--bad"), "fill-opacity": ".09", stroke: "none"
+        }));
+        svg.appendChild(el("path", {
+          d: linePath(s.target, x, y),
+          fill: "none", stroke: cssVar(s.hue), "stroke-width": 1.5,
+          "stroke-dasharray": "1 4", "stroke-opacity": ".9", "stroke-linecap": "round"
+        }));
+      }
+
+      if (VIEW.compare && s.compare) {
+        svg.appendChild(el("path", {
+          d: linePath(s.compare, x, y),
+          fill: "none", stroke: cssVar(s.hue), "stroke-width": 1.5,
+          "stroke-opacity": ".4", "stroke-dasharray": "6 3", "stroke-linecap": "round"
+        }));
+      }
+
+      if (VIEW.trend) {
+        var fit = linearFit(s.values);
+        if (fit) {
+          var v0 = Math.max(0, Math.min(scale.max, fit.b));
+          var v1 = Math.max(0, Math.min(scale.max, fit.m * (n - 1) + fit.b));
+          svg.appendChild(el("line", {
+            x1: x(0), y1: y(v0), x2: x(n - 1), y2: y(v1),
+            stroke: cssVar(s.hue), "stroke-width": 1.5, "stroke-opacity": ".5",
+            "stroke-dasharray": "10 5", "stroke-linecap": "round"
+          }));
+        }
+      }
+
+      /* No area wash here: three stacked fills read as solid blocks and
+         bury the line. The panel's own baseline carries the zero. */
+      svg.appendChild(el("path", {
+        d: linePath(s.values, x, y),
+        fill: "none", stroke: cssVar(s.hue), "stroke-width": 2,
+        "stroke-linecap": "round", "stroke-linejoin": "round"
+      }));
+
+      if (li >= 0) {
+        svg.appendChild(el("circle", {
+          cx: x(li), cy: y(s.values[li]), r: 3.5,
+          fill: cssVar(s.hue), stroke: cssVar("--z-surface"), "stroke-width": 2
+        }));
+      }
+    });
+
+    var axisY = height - 6;
+    var every = Math.ceil(n / Math.max(2, Math.floor(plotW / 42)));
+    spec.labels.forEach(function (label, i) {
+      if (i % every !== 0 && i !== n - 1) return;
+      var t = el("text", {
+        x: x(i), y: axisY, "text-anchor": "middle",
+        fill: cssVar("--z-ink-3"), "font-size": "10"
+      });
+      t.textContent = label;
+      svg.appendChild(t);
+    });
+
+    attachInteractions(svg, spec, live, {
+      x: x, n: n, pad: { t: pad.t, l: pad.l },
+      plotW: plotW, plotH: height - pad.t - axisH,
+      panels: panels
+    });
+
+    host.appendChild(svg);
+  }
+
+  /* ---- 5.5 Interaction: hover · brush-zoom · drill --------------------
+     The crosshair finds the X — the reader aims at a month, never at a 2px
+     line — and one tooltip lists every series at that X. Dragging selects a
+     month range (linked across every month chart); a click without a drag
+     opens the records behind that point.
+  ---------------------------------------------------------------------- */
+
+  function attachInteractions(svg, spec, live, geo) {
+    var crosshair = el("line", {
+      y1: geo.pad.t, y2: geo.pad.t + geo.plotH,
+      stroke: cssVar("--z-ink-3"), "stroke-width": 1, opacity: "0"
+    });
+    svg.appendChild(crosshair);
+
+    var dots = live.map(function (s) {
+      var c = el("circle", {
+        r: 4, fill: cssVar(s.hue),
+        stroke: cssVar("--z-surface"), "stroke-width": 2, opacity: "0"
+      });
+      svg.appendChild(c);
+      return c;
+    });
+
+    var band = el("rect", {
+      y: geo.pad.t, height: geo.plotH, width: 0, x: 0,
+      fill: cssVar("--z-accent"), "fill-opacity": ".10", opacity: "0"
+    });
+    svg.appendChild(band);
+
+    /* transparent hit layer — the target is the whole plot, not the marks */
+    var hit = el("rect", {
+      x: geo.pad.l, y: geo.pad.t, width: geo.plotW, height: geo.plotH,
+      fill: "transparent"
+    });
+    if (spec.zoomable) hit.setAttribute("cursor", "crosshair");
+    svg.appendChild(hit);
+
+    var active = -1;
+    var drag = null;
+
+    function localX(evt) {
+      var box = svg.getBoundingClientRect();
+      var k = box.width / svg.viewBox.baseVal.width || 1;
+      return (evt.clientX - box.left) / k;
+    }
+
+    function nearest(evt) {
+      var t = geo.n === 1 ? 0
+        : (localX(evt) - geo.pad.l) / (geo.plotW / (geo.n - 1));
+      return Math.max(0, Math.min(geo.n - 1, Math.round(t)));
+    }
+
+    function show(i, clientX, clientY) {
+      if (i < 0 || i >= geo.n) return;
+      active = i;
+
+      var px = geo.x(i);
+      crosshair.setAttribute("x1", px);
+      crosshair.setAttribute("x2", px);
+      crosshair.setAttribute("opacity", ".45");
+
+      var rows = [];
+      live.forEach(function (s, si) {
+        var v = s.values[i];
+        var yFn = geo.panels ? geo.panels[si].y : geo.yShared;
+        var f = geo.panels ? geo.panels[si].fmt : geo.fmt;
+
+        if (v == null || !yFn) dots[si].setAttribute("opacity", "0");
+        else {
+          dots[si].setAttribute("cx", px);
+          dots[si].setAttribute("cy", yFn(v));
+          dots[si].setAttribute("opacity", "1");
+        }
+
+        /* period-over-period movement, the number the reader actually wants */
+        var prev = i > 0 ? s.values[i - 1] : null;
+        var mom = (v != null && prev != null && prev !== 0)
+          ? ((v - prev) / Math.abs(prev)) * 100 : null;
+        var up = mom != null && mom >= 0;
+        var good = s.upIsGood === false ? !up : up;
+
+        var extras = [];
+        if (VIEW.compare && s.compare && s.compare[i] != null) {
+          extras.push({ label: "vs " + (spec.compareLabel || "last year"), value: f(s.compare[i]) });
+        }
+        if (VIEW.target && s.target && s.target[i] != null) {
+          var gap = v != null ? v - s.target[i] : null;
+          extras.push({
+            label: "vs target " + f(s.target[i]),
+            value: gap == null ? "–" : (gap >= 0 ? "+" : "") + f(gap)
+          });
+        }
+
+        rows.push({
+          name: s.name,
+          color: cssVar(s.hue),
+          value: f(v),
+          delta: mom == null || Math.abs(mom) < 0.05 ? null : {
+            text: fmtSignedPct(mom),
+            dir: good ? "good" : "bad"
+          },
+          extras: extras
+        });
+      });
+
+      showTip(spec.labels[i], rows, clientX, clientY);
+    }
+
+    function hide() {
+      active = -1;
+      crosshair.setAttribute("opacity", "0");
+      dots.forEach(function (d) { d.setAttribute("opacity", "0"); });
+      hideTip();
+    }
+
+    svg.addEventListener("pointermove", function (e) {
+      if (drag) {
+        drag.moved = true;
+        var cx = Math.max(geo.pad.l, Math.min(geo.pad.l + geo.plotW, localX(e)));
+        drag.currentX = cx;
+        var x0 = Math.min(drag.startX, cx), x1 = Math.max(drag.startX, cx);
+        band.setAttribute("x", x0);
+        band.setAttribute("width", x1 - x0);
+        band.setAttribute("opacity", "1");
+        hideTip();
+        crosshair.setAttribute("opacity", "0");
+        return;
+      }
+      show(nearest(e), e.clientX, e.clientY);
+    });
+
+    svg.addEventListener("pointerleave", function () { if (!drag) hide(); });
+    svg.addEventListener("blur", hide);
+
+    svg.addEventListener("focus", function () {
+      var i = active >= 0 ? active : geo.n - 1;
+      var box = svg.getBoundingClientRect();
+      show(i, box.left + box.width / 2, box.top);
+    });
+
+    svg.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && active >= 0) {
+        e.preventDefault();
+        openDrill(spec, live, active);
+        return;
+      }
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      var i = active < 0 ? geo.n - 1 : active + (e.key === "ArrowRight" ? 1 : -1);
+      i = Math.max(0, Math.min(geo.n - 1, i));
+      var box = svg.getBoundingClientRect();
+      show(i, box.left + geo.x(i) * (box.width / svg.viewBox.baseVal.width), box.top);
+    });
+
+    /* --- brush to zoom / click to drill --- */
+
+    svg.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      var lx = localX(e);
+      if (lx < geo.pad.l - 4 || lx > geo.pad.l + geo.plotW + 4) return;
+      drag = { startX: Math.max(geo.pad.l, Math.min(geo.pad.l + geo.plotW, lx)), moved: false };
+      try { svg.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+    });
+
+    function endDrag(e) {
+      if (!drag) return;
+      var d = drag;
+      drag = null;
+      band.setAttribute("opacity", "0");
+      band.setAttribute("width", 0);
+      try { svg.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
+
+      var travelled = d.currentX != null ? Math.abs(d.currentX - d.startX) : 0;
+
+      /* a drag selects a range; a tap opens the records behind the point */
+      if (spec.zoomable && d.moved && travelled >= 10) {
+        var step = geo.plotW / Math.max(1, geo.n - 1);
+        var i0 = Math.round((Math.min(d.startX, d.currentX) - geo.pad.l) / step);
+        var i1 = Math.round((Math.max(d.startX, d.currentX) - geo.pad.l) / step);
+        i0 = Math.max(0, Math.min(geo.n - 1, i0));
+        i1 = Math.max(0, Math.min(geo.n - 1, i1));
+        if (i1 - i0 >= 1) {
+          var base = spec.rangeBase || 0;
+          VIEW.range = [base + i0, base + i1];
+          rerender();
+        }
+        return;
+      }
+
+      if (!d.moved || travelled < 6) {
+        var i = nearest(e);
+        openDrill(spec, live, i);
+      }
+    }
+
+    svg.addEventListener("pointerup", endDrag);
+    svg.addEventListener("pointercancel", function (e) {
+      drag = null;
+      band.setAttribute("opacity", "0");
+      try { svg.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
+    });
+  }
+
+  /* ---- 5.6 Tooltip ----------------------------------------------------- */
+
+  var tipEl = null;
+
+  function showTip(heading, rows, clientX, clientY) {
+    if (!tipEl) tipEl = document.getElementById("lp-tip");
+    if (!tipEl) return;
+
+    tipEl.textContent = "";
+
+    var head = document.createElement("div");
+    head.className = "lp-tip__head";
+    head.textContent = heading;            // untrusted label -> textContent
+    tipEl.appendChild(head);
+
+    rows.forEach(function (r) {
+      var row = document.createElement("div");
+      row.className = "lp-tip__row";
+
+      var key = document.createElement("span");
+      key.className = "lp-tip__key";
+      key.style.background = r.color;
+
+      var name = document.createElement("span");
+      name.className = "lp-tip__name";
+      name.textContent = r.name;
+
+      var val = document.createElement("span");
+      val.className = "lp-tip__value";
+      val.textContent = r.value;
+
+      row.appendChild(key);
+      row.appendChild(name);
+      row.appendChild(val);
+
+      if (r.delta) {
+        var d = document.createElement("span");
+        d.className = "lp-tip__delta";
+        d.setAttribute("data-dir", r.delta.dir);
+        d.textContent = r.delta.text;
+        row.appendChild(d);
+      }
+      tipEl.appendChild(row);
+
+      (r.extras || []).forEach(function (x) {
+        var sub = document.createElement("div");
+        sub.className = "lp-tip__sub";
+        var sl = document.createElement("span");
+        sl.textContent = x.label;
+        var sv = document.createElement("span");
+        sv.className = "lp-tip__sub-value";
+        sv.textContent = x.value;
+        sub.appendChild(sl);
+        sub.appendChild(sv);
+        tipEl.appendChild(sub);
+      });
+    });
+
+    var foot = document.createElement("div");
+    foot.className = "lp-tip__foot";
+    foot.textContent = "Click to see records · drag to zoom";
+    tipEl.appendChild(foot);
+
+    tipEl.hidden = false;
+
+    var box = tipEl.getBoundingClientRect();
+    var left = clientX + 14;
+    var top = clientY - box.height / 2;
+    if (left + box.width > window.innerWidth - 8) left = clientX - box.width - 14;
+    top = Math.max(8, Math.min(window.innerHeight - box.height - 8, top));
+    tipEl.style.left = Math.max(8, left) + "px";
+    tipEl.style.top = top + "px";
+  }
+
+  function hideTip() {
+    if (!tipEl) tipEl = document.getElementById("lp-tip");
+    if (tipEl) tipEl.hidden = true;
+  }
+
+  /* ---- 5.7 Mount + responsive redraw ---------------------------------- */
+
+  var mounted = [];
+
+  /**
+   * Register a chart. Drawing is deferred to drawAll() — a chart measures its
+   * own container, and at mount time the card is not in the document yet
+   * (clientWidth 0), so an immediate draw would render nothing.
+   */
+  function mount(hostEl, spec) {
+    hostEl.__spec = spec;
+    if (mounted.indexOf(hostEl) === -1) mounted.push(hostEl);
+  }
+
+  function drawAll() {
+    mounted.forEach(function (h) {
+      if (h.isConnected && !h.hidden) draw(h);
+    });
+  }
+
+  var redrawTimer = null;
+  function redrawAll() {
+    clearTimeout(redrawTimer);
+    redrawTimer = setTimeout(function () {
+      drawAll();
+      resizeWidget();
+    }, 90);
+  }
+
+  window.addEventListener("resize", redrawAll);
+
+  /* ======================================================================
+     6. Renderers
+     ====================================================================== */
+
+  /* ---- 6.1 Stat tile --------------------------------------------------- */
+
+  function statTile(cfg, data, prev) {
+    var tile = document.createElement("div");
+    tile.className = "lp-tile";
+
+    var label = document.createElement("div");
+    label.className = "lp-tile__label";
+    label.textContent = cfg.label;
+    tile.appendChild(label);
+
+    var fmt = formatter(cfg.format);
+
+    var value = document.createElement("div");
+    value.className = "lp-tile__value";
+    value.textContent = fmt(data);
+    tile.appendChild(value);
+
+    if (prev != null && isFinite(prev) && prev !== 0 && data != null) {
+      var pct = ((data - prev) / Math.abs(prev)) * 100;
+      var up = pct >= 0;
+      var good = cfg.upIsGood === false ? !up : up;
+
+      var delta = document.createElement("div");
+      delta.className = "lp-tile__delta";
+      /* the arrow carries direction, so meaning never rests on colour alone */
+      delta.setAttribute("data-dir", Math.abs(pct) < 0.05 ? "flat" : (good ? "good" : "bad"));
+
+      var arrow = document.createElement("span");
+      arrow.textContent = up ? "▲" : "▼";
+      arrow.setAttribute("aria-hidden", "true");
+
+      var text = document.createElement("span");
+      text.textContent = Math.abs(Math.round(pct * 10) / 10) + "%";
+
+      var since = document.createElement("span");
+      since.className = "lp-tile__delta-since";
+      since.textContent = "vs last year";
+
+      delta.appendChild(arrow);
+      delta.appendChild(text);
+      delta.appendChild(since);
+      tile.appendChild(delta);
+    } else if (cfg.note) {
+      var note = document.createElement("div");
+      note.className = "lp-tile__delta";
+      note.textContent = cfg.note;
+      tile.appendChild(note);
+    }
+
+    if (cfg.pair) {
+      var sub = document.createElement("div");
+      sub.className = "lp-tile__sub";
+
+      var sl = document.createElement("span");
+      sl.className = "lp-tile__sub-label";
+      sl.textContent = cfg.pair.label;
+
+      var sv = document.createElement("span");
+      sv.className = "lp-tile__sub-value";
+      sv.textContent = formatter(cfg.pair.format)(cfg.pair.value);
+
+      sub.appendChild(sl);
+      sub.appendChild(sv);
+      tile.appendChild(sub);
+    }
+
+    return tile;
+  }
+
+  /* ---- 6.2 Meter — Forecasted vs Attainment ---------------------------- */
+
+  function meterTile(label, forecast, attained) {
+    var tile = document.createElement("div");
+    tile.className = "lp-tile";
+
+    var lbl = document.createElement("div");
+    lbl.className = "lp-tile__label";
+    lbl.textContent = label;
+    tile.appendChild(lbl);
+
+    var pct = forecast > 0 ? (attained / forecast) * 100 : 0;
+
+    var val = document.createElement("div");
+    val.className = "lp-tile__value";
+    val.textContent = fmtPercent(pct);
+    tile.appendChild(val);
+
+    var meter = document.createElement("div");
+    meter.className = "lp-meter";
+
+    var track = document.createElement("div");
+    track.className = "lp-meter__track";
+    track.setAttribute("role", "meter");
+    track.setAttribute("aria-valuenow", Math.round(pct));
+    track.setAttribute("aria-valuemin", "0");
+    track.setAttribute("aria-valuemax", "100");
+    track.setAttribute("aria-label", label);
+
+    var fill = document.createElement("div");
+    fill.className = "lp-meter__fill";
+    fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    fill.setAttribute("data-state", pct >= 90 ? "ok" : pct >= 70 ? "warning" : "danger");
+
+    track.appendChild(fill);
+    meter.appendChild(track);
+
+    var legend = document.createElement("div");
+    legend.className = "lp-meter__legend";
+
+    var a = document.createElement("span");
+    a.textContent = "Attained " + fmtCurrency(attained);
+    var f = document.createElement("span");
+    f.textContent = "Forecast " + fmtCurrency(forecast);
+
+    legend.appendChild(a);
+    legend.appendChild(f);
+    meter.appendChild(legend);
+    tile.appendChild(meter);
+
+    return tile;
+  }
+
+  /* ---- 6.3 Chart card -------------------------------------------------- */
+
+  function chartCard(spec) {
+    var card = document.createElement("div");
+    card.className = "lp-card";
+
+    var head = document.createElement("div");
+    head.className = "lp-card__head";
+
+    var titles = document.createElement("div");
+    var h3 = document.createElement("h3");
+    h3.className = "lp-card__title";
+    h3.textContent = spec.title;
+    titles.appendChild(h3);
+
+    if (spec.subtitle) {
+      var sub = document.createElement("p");
+      sub.className = "lp-card__sub";
+      sub.textContent = spec.subtitle;
+      titles.appendChild(sub);
+    }
+    head.appendChild(titles);
+
+    /* every chart keeps a table view — the tooltip enhances, never gates */
+    var toggle = document.createElement("button");
+    toggle.className = "lp-card__toggle";
+    toggle.type = "button";
+    toggle.setAttribute("aria-pressed", "false");
+    toggle.textContent = "Table";
+    head.appendChild(toggle);
+    card.appendChild(head);
+
+    var chart = document.createElement("div");
+    chart.className = "lp-chart";
+    chart.__muted = {};
+
+    /* Which analysis overlays are actually on screen for this chart. Their
+       dash patterns need decoding, so they get legend keys of their own —
+       otherwise a ghost line is just an unexplained stroke. */
+    function anySeriesHas(prop) {
+      return spec.series.some(function (s) { return !!s[prop]; });
+    }
+    var overlayKeys = [];
+    if (VIEW.compare && anySeriesHas("compare")) {
+      overlayKeys.push({ label: spec.compareLabel || "Last year", dash: "6 3", opacity: ".45" });
+    }
+    if (VIEW.target && anySeriesHas("target")) {
+      overlayKeys.push({ label: "Target", dash: "1 4", opacity: ".9" });
+    }
+    if (VIEW.trend) {
+      overlayKeys.push({ label: "Trend", dash: "10 5", opacity: ".6" });
+    }
+
+    var wantsSeriesLegend = spec.mode !== "panels" && spec.series.length >= 2;
+
+    /* legend: present for 2+ series in overlay mode; panels self-label.
+       Each key is a button that mutes its series — identity stays bound to
+       the entity, so muting never repaints the survivors. */
+    if (wantsSeriesLegend || overlayKeys.length) {
+      var legend = document.createElement("div");
+      legend.className = "lp-legend";
+
+      if (wantsSeriesLegend) spec.series.forEach(function (s) {
+        var item = document.createElement("button");
+        item.type = "button";
+        item.className = "lp-legend__item";
+        item.setAttribute("aria-pressed", "true");
+        item.title = "Show only this series, or hide it";
+
+        var key = document.createElement("span");
+        key.className = "lp-legend__key";
+        key.style.background = cssVar(s.hue);
+
+        var name = document.createElement("span");
+        name.textContent = s.name;
+
+        item.appendChild(key);
+        item.appendChild(name);
+
+        item.addEventListener("click", function () {
+          var on = !chart.__muted[s.id];
+          /* never mute the last visible series — that empties the chart */
+          var visible = spec.series.filter(function (o) { return !chart.__muted[o.id]; });
+          if (on && visible.length <= 1) return;
+
+          chart.__muted[s.id] = on;
+          item.setAttribute("aria-pressed", String(!on));
+          draw(chart);
+          resizeWidget();
+        });
+
+        legend.appendChild(item);
+      });
+
+      overlayKeys.forEach(function (o) {
+        var item = document.createElement("span");
+        item.className = "lp-legend__item lp-legend__item--overlay";
+
+        /* a dashed stroke in neutral ink: the pattern is the identity here,
+           the hue still belongs to whichever series it trails */
+        var swatch = document.createElementNS(SVG_NS, "svg");
+        swatch.setAttribute("class", "lp-legend__dash");
+        swatch.setAttribute("viewBox", "0 0 16 4");
+        swatch.setAttribute("aria-hidden", "true");
+        swatch.appendChild(el("line", {
+          x1: 0, y1: 2, x2: 16, y2: 2,
+          stroke: cssVar("--z-ink-3"), "stroke-width": 1.5,
+          "stroke-dasharray": o.dash, "stroke-opacity": o.opacity
+        }));
+
+        var name = document.createElement("span");
+        name.textContent = o.label;
+
+        item.appendChild(swatch);
+        item.appendChild(name);
+        legend.appendChild(item);
+      });
+
+      card.appendChild(legend);
+    }
+
+    var body = document.createElement("div");
+    body.className = "lp-card__body";
+    body.appendChild(chart);
+
+    var tableWrap = document.createElement("div");
+    tableWrap.className = "lp-table-wrap";
+    tableWrap.hidden = true;
+    tableWrap.appendChild(buildTable(spec));
+    body.appendChild(tableWrap);
+
+    card.appendChild(body);
+
+    toggle.addEventListener("click", function () {
+      var on = toggle.getAttribute("aria-pressed") === "true";
+      toggle.setAttribute("aria-pressed", String(!on));
+      tableWrap.hidden = on;
+      chart.hidden = !on;
+      if (on) draw(chart);
+      resizeWidget();
+    });
+
+    mount(chart, spec);
+    return card;
+  }
+
+  /**
+   * The table carries every number the overlays add, so nothing is reachable
+   * only by hovering.
+   */
+  function buildTable(spec) {
+    var table = document.createElement("table");
+    table.className = "lp-table";
+
+    var cols = [];
+    spec.series.forEach(function (s) {
+      cols.push({ name: s.name, values: s.values, format: s.format || spec.valueFormat });
+      if (VIEW.compare && s.compare) {
+        cols.push({
+          name: s.name + " (last year)", values: s.compare,
+          format: s.format || spec.valueFormat, soft: true
+        });
+      }
+      if (VIEW.target && s.target) {
+        cols.push({
+          name: s.name + " (target)", values: s.target,
+          format: s.format || spec.valueFormat, soft: true
+        });
+      }
+    });
+
+    var thead = document.createElement("thead");
+    var hr = document.createElement("tr");
+    var th0 = document.createElement("th");
+    th0.scope = "col";
+    th0.textContent = spec.xLabel || "Period";
+    hr.appendChild(th0);
+
+    cols.forEach(function (c) {
+      var th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = c.name;
+      if (c.soft) th.className = "is-soft";
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement("tbody");
+    spec.labels.forEach(function (label, i) {
+      var tr = document.createElement("tr");
+      var td0 = document.createElement("th");
+      td0.scope = "row";
+      td0.textContent = label;
+      td0.style.fontWeight = "500";
+      tr.appendChild(td0);
+
+      cols.forEach(function (c) {
+        var td = document.createElement("td");
+        td.textContent = formatter(c.format)(c.values[i]);
+        if (c.soft) td.className = "is-soft";
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  /* ---- 6.4 Series builder --------------------------------------------- */
+
+  /**
+   * Assemble one series, applying the brush window to the actuals and to
+   * every overlay in step so they always line up.
+   */
+  function makeSeries(o, win, len) {
+    var full = align(o.values, len);
+    var s = {
+      id: o.id,
+      name: o.name,
+      hue: o.hue,
+      format: o.format,
+      upIsGood: o.upIsGood,
+      drill: o.drill,
+      values: win ? slice(full, win) : full
+    };
+
+    if (o.compare) {
+      var c = align(o.compare, len);
+      s.compare = win ? slice(c, win) : c;
+    }
+    if (o.target != null) {
+      var t = targetArray(o.target, len);
+      s.target = win ? slice(t, win) : t;
+    }
+    return s;
+  }
+
+  /* ---- 6.5 Scorecard --------------------------------------------------- */
+
+  function renderScorecard(d) {
+    var host = document.getElementById("ytd-tiles");
+    host.textContent = "";
+
+    /* Row 2 of the whiteboard sits under its row-1 counterpart, so each
+       column renders as one tile carrying a paired sub-metric. */
+    var tiles = [
+      { label: "New Prospects", key: "newProspects", format: "count",
+        pair: { label: "< 5K Customers", key: "under5kCustomers", format: "count" } },
+      { label: "Cross-Sell Prospects", key: "csProspects", format: "count",
+        pair: { label: "> 5K Customers", key: "over5kCustomers", format: "count" } },
+      { label: "New Customers", key: "newCustomers", format: "count",
+        pair: { label: "New Revenue", key: "newRevenue", format: "currency" } },
+      { label: "Cross-Sell Customers", key: "csCustomers", format: "count",
+        pair: { label: "Cross-Sell Revenue", key: "csRevenue", format: "currency" } },
+      { label: "Total Customers", key: "totalCustomers", format: "count",
+        pair: { label: "Total Revenue", key: "totalRevenue", format: "currency" } },
+      { label: "Conversion %", key: "convPct", format: "percent" }
+    ];
+
+    tiles.forEach(function (t) {
+      var cfg = { label: t.label, format: t.format };
+      if (t.pair) {
+        cfg.pair = {
+          label: t.pair.label,
+          format: t.pair.format,
+          value: d.ytd[t.pair.key]
+        };
+      }
+      var tile = statTile(cfg, d.ytd[t.key], d.prev ? d.prev[t.key] : null);
+      if (!t.pair) {
+        var spacer = document.createElement("div");
+        spacer.className = "lp-tile__spacer";
+        tile.appendChild(spacer);
+      }
+      host.appendChild(tile);
+    });
+
+    document.getElementById("lp-ytd-note").textContent =
+      "Cross-sell = CS · revenue band split at " + CONFIG.currency + "5K";
+  }
+
+  /* ---- 6.6 Trend sections --------------------------------------------- */
+
+  function windowNote(win) {
+    return win.all[win.start] + " – " + win.all[win.end];
+  }
+
+  function renderPerformance(d) {
+    var host = document.getElementById("perf-charts");
+    host.textContent = "";
+
+    var win = windowFor(d.year);
+    var len = win.all.length;
+    var months = win.all.slice(win.start, win.end + 1);
+    var ly = d.lastYear || {};
+
+    /* Revenue, Customers and Leads do not share a unit — small multiples,
+       one y-scale per panel. A single frame here would need two axes. */
+    host.appendChild(chartCard({
+      title: "Monthly performance",
+      subtitle: windowNote(win) + " " + d.year +
+        (VIEW.range ? " · zoomed" : " · year to date"),
+      mode: "panels",
+      zoomable: true,
+      rangeBase: win.start,
+      xLabel: "Month",
+      labels: months,
+      series: [
+        makeSeries({
+          id: "revenue", name: "Revenue", hue: HUE.revenue, format: "currency",
+          values: d.monthly.revenue,
+          compare: ly.monthly && ly.monthly.revenue,
+          target: d.targets && d.targets.monthlyRevenue,
+          drill: { module: "Deals", noun: "deals" }
+        }, win, len),
+        makeSeries({
+          id: "customers", name: "Customers", hue: HUE.customers, format: "count",
+          values: d.monthly.customers,
+          compare: ly.monthly && ly.monthly.customers,
+          target: d.targets && d.targets.monthlyCustomers,
+          drill: { module: "Accounts", noun: "customers" }
+        }, win, len),
+        makeSeries({
+          id: "leads", name: "Leads", hue: HUE.leads, format: "count",
+          values: d.monthly.leads,
+          compare: ly.monthly && ly.monthly.leads,
+          drill: { module: "Leads", noun: "leads" }
+        }, win, len)
+      ]
+    }));
+
+    host.appendChild(chartCard({
+      title: "Quarterly performance",
+      subtitle: "Q1 – Q4 " + d.year,
+      mode: "panels",
+      zoomable: false,           // quarters are not on the month axis
+      xLabel: "Quarter",
+      labels: QUARTERS,
+      series: [
+        makeSeries({
+          id: "revenue", name: "Revenue", hue: HUE.revenue, format: "currency",
+          values: d.quarterly.revenue,
+          compare: ly.quarterly && ly.quarterly.revenue,
+          target: d.targets && d.targets.quarterlyRevenue,
+          drill: { module: "Deals", noun: "deals" }
+        }, null, 4),
+        makeSeries({
+          id: "customers", name: "Customers", hue: HUE.customers, format: "count",
+          values: d.quarterly.customers,
+          compare: ly.quarterly && ly.quarterly.customers,
+          drill: { module: "Accounts", noun: "customers" }
+        }, null, 4),
+        makeSeries({
+          id: "leads", name: "Leads", hue: HUE.leads, format: "count",
+          values: d.quarterly.leads,
+          compare: ly.quarterly && ly.quarterly.leads,
+          drill: { module: "Leads", noun: "leads" }
+        }, null, 4)
+      ]
+    }));
+  }
+
+  function renderPipeline(d) {
+    var host = document.getElementById("pipeline-tiles");
+    host.textContent = "";
+
+    var p = d.pipeline;
+    var prev = d.prevPipeline || {};
+
+    host.appendChild(statTile(
+      { label: "Qualified Lost Customers", format: "count", upIsGood: false },
+      p.qualifiedLostCustomers, prev.qualifiedLostCustomers
+    ));
+
+    host.appendChild(statTile(
+      { label: "Lost Revenue", format: "currency", upIsGood: false },
+      p.lostRevenue, prev.lostRevenue
+    ));
+
+    host.appendChild(statTile(
+      { label: "Pipeline Revenue", format: "currency", note: "Q" + currentQuarter() + " " + d.year },
+      p.pipelineRevenueQuarter, null
+    ));
+
+    host.appendChild(statTile(
+      { label: "Pipeline Revenue", format: "currency", note: "FY " + d.year },
+      p.pipelineRevenueYear, null
+    ));
+
+    host.appendChild(meterTile(
+      "Forecasted vs Attainment", p.forecastRevenue, p.attainedRevenue
+    ));
+  }
+
+  function renderBookings(d) {
+    var host = document.getElementById("bookings-charts");
+    host.textContent = "";
+
+    var win = windowFor(d.year);
+    var len = win.all.length;
+    var months = win.all.slice(win.start, win.end + 1);
+    var ly = d.lastYear || {};
+
+    /* Both series are customer counts — same unit, so one shared axis. */
+    host.appendChild(chartCard({
+      title: "Churned vs booked customers",
+      subtitle: "Number of customers churned from your bookings",
+      mode: "overlay",
+      valueFormat: "count",
+      zoomable: true,
+      rangeBase: win.start,
+      xLabel: "Month",
+      labels: months,
+      series: [
+        makeSeries({
+          id: "booked", name: "Booked customers", hue: HUE.booked,
+          values: d.bookings.booked,
+          compare: ly.bookings && ly.bookings.booked,
+          drill: { module: "Accounts", noun: "booked customers" }
+        }, win, len),
+        makeSeries({
+          id: "churned", name: "Churned customers", hue: HUE.churned,
+          upIsGood: false,
+          values: d.bookings.churned,
+          compare: ly.bookings && ly.bookings.churned,
+          drill: { module: "Accounts", noun: "churned customers" }
+        }, win, len)
+      ]
+    }));
+
+    /* All three are percentages — same unit, one axis. */
+    host.appendChild(chartCard({
+      title: "Monthly PSE's / closures",
+      subtitle: "Share of closures, %",
+      mode: "overlay",
+      valueFormat: "percent",
+      zoomable: true,
+      rangeBase: win.start,
+      xLabel: "Month",
+      labels: months,
+      series: [
+        makeSeries({
+          id: "pse", name: "PSE's", hue: HUE.pse,
+          values: d.pse.pse,
+          compare: ly.pse && ly.pse.pse,
+          target: d.targets && d.targets.pseClosureRate,
+          drill: { module: "Deals", noun: "PSE closures" }
+        }, win, len),
+        makeSeries({
+          id: "revenue", name: "Revenue", hue: HUE.revenue,
+          values: d.pse.revenue,
+          compare: ly.pse && ly.pse.revenue,
+          drill: { module: "Deals", noun: "deals" }
+        }, win, len),
+        makeSeries({
+          id: "customers", name: "Customers", hue: HUE.customers,
+          values: d.pse.customers,
+          compare: ly.pse && ly.pse.customers,
+          drill: { module: "Accounts", noun: "customers" }
+        }, win, len)
+      ]
+    }));
+  }
+
+  function renderChannel(d) {
+    var host = document.getElementById("channel-charts");
+    host.textContent = "";
+
+    var win = windowFor(d.year);
+    var len = win.all.length;
+    var months = win.all.slice(win.start, win.end + 1);
+    var ly = d.lastYear || {};
+
+    /* Guided selling keeps slot 1 and self service slot 2 in BOTH charts —
+       colour follows the entity, so the eye carries across the pair. */
+    host.appendChild(chartCard({
+      title: "Guided selling vs self service — customers",
+      subtitle: windowNote(win) + " " + d.year,
+      mode: "overlay",
+      valueFormat: "count",
+      zoomable: true,
+      rangeBase: win.start,
+      xLabel: "Month",
+      labels: months,
+      series: [
+        makeSeries({
+          id: "guided", name: "Guided selling customers", hue: HUE.guided,
+          values: d.channel.guidedCustomers,
+          compare: ly.channel && ly.channel.guidedCustomers,
+          drill: { module: "Accounts", noun: "guided-selling customers" }
+        }, win, len),
+        makeSeries({
+          id: "self", name: "Self service customers", hue: HUE.selfService,
+          values: d.channel.selfServeCustomers,
+          compare: ly.channel && ly.channel.selfServeCustomers,
+          drill: { module: "Accounts", noun: "self-service customers" }
+        }, win, len)
+      ]
+    }));
+
+    host.appendChild(chartCard({
+      title: "Guided selling vs self service — revenue",
+      subtitle: windowNote(win) + " " + d.year,
+      mode: "overlay",
+      valueFormat: "currency",
+      zoomable: true,
+      rangeBase: win.start,
+      xLabel: "Month",
+      labels: months,
+      series: [
+        makeSeries({
+          id: "guided", name: "Guided selling revenue", hue: HUE.guided,
+          values: d.channel.guidedRevenue,
+          compare: ly.channel && ly.channel.guidedRevenue,
+          drill: { module: "Deals", noun: "guided-selling deals" }
+        }, win, len),
+        makeSeries({
+          id: "self", name: "Self service revenue", hue: HUE.selfService,
+          values: d.channel.selfServeRevenue,
+          compare: ly.channel && ly.channel.selfServeRevenue,
+          drill: { module: "Deals", noun: "self-service deals" }
+        }, win, len)
+      ]
+    }));
+  }
+
+  /* ======================================================================
+     7. Drill-through panel
+     ====================================================================== */
+
+  var drillState = { open: false, lastFocus: null };
+
+  function openDrill(spec, live, index) {
+    if (!CONFIG.enableDrill) return;
+
+    var period = spec.labels[index];
+    var primary = live[0];
+    if (!primary) return;
+
+    var panel = document.getElementById("lp-drill");
+    var titleEl = document.getElementById("lp-drill-title");
+    var subEl = document.getElementById("lp-drill-sub");
+    var bodyEl = document.getElementById("lp-drill-body");
+
+    drillState.lastFocus = document.activeElement;
+    drillState.open = true;
+
+    titleEl.textContent = period + " " + (state.year);
+    subEl.textContent = spec.title;
+
+    bodyEl.textContent = "";
+
+    /* the numbers behind the point, before the records load */
+    var summary = document.createElement("div");
+    summary.className = "lp-drill__summary";
+    live.forEach(function (s) {
+      var f = formatter(s.format || spec.valueFormat);
+      var row = document.createElement("div");
+      row.className = "lp-drill__stat";
+
+      var k = document.createElement("span");
+      k.className = "lp-drill__key";
+      k.style.background = cssVar(s.hue);
+
+      var nm = document.createElement("span");
+      nm.className = "lp-drill__stat-name";
+      nm.textContent = s.name;
+
+      var vv = document.createElement("span");
+      vv.className = "lp-drill__stat-value";
+      vv.textContent = f(s.values[index]);
+
+      row.appendChild(k);
+      row.appendChild(nm);
+      row.appendChild(vv);
+      summary.appendChild(row);
+    });
+    bodyEl.appendChild(summary);
+
+    var listHead = document.createElement("div");
+    listHead.className = "lp-drill__list-head";
+    listHead.textContent = "Records";
+    bodyEl.appendChild(listHead);
+
+    var loading = document.createElement("div");
+    loading.className = "lp-drill__empty";
+    loading.textContent = "Loading records…";
+    bodyEl.appendChild(loading);
+
+    panel.hidden = false;
+    document.getElementById("lp-scrim").hidden = false;
+    document.getElementById("lp-drill-close").focus();
+
+    fetchDrillRows(primary, period).then(function (rows) {
+      if (!drillState.open) return;
+      loading.remove();
+
+      if (!rows.length) {
+        var none = document.createElement("div");
+        none.className = "lp-drill__empty";
+        none.textContent = "No records matched this point.";
+        bodyEl.appendChild(none);
+        return;
+      }
+
+      var list = document.createElement("ul");
+      list.className = "lp-drill__list";
+
+      rows.forEach(function (r) {
+        var li = document.createElement("li");
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "lp-drill__row";
+
+        var nm = document.createElement("span");
+        nm.className = "lp-drill__row-name";
+        nm.textContent = r.name;              // untrusted -> textContent
+
+        var meta = document.createElement("span");
+        meta.className = "lp-drill__row-meta";
+        meta.textContent = r.meta || "";
+
+        var amt = document.createElement("span");
+        amt.className = "lp-drill__row-amount";
+        amt.textContent = r.amount || "";
+
+        btn.appendChild(nm);
+        btn.appendChild(meta);
+        btn.appendChild(amt);
+
+        btn.addEventListener("click", function () {
+          if (window.ZOHO && ZOHO.CRM && ZOHO.CRM.UI && ZOHO.CRM.UI.Record && r.id) {
+            ZOHO.CRM.UI.Record.open({ Entity: r.module, RecordID: r.id })
+              .catch(function () { /* record may be deleted or not permitted */ });
+          }
+        });
+
+        li.appendChild(btn);
+        list.appendChild(li);
+      });
+
+      bodyEl.appendChild(list);
+    }).catch(function (err) {
+      if (!drillState.open) return;
+      loading.className = "lp-drill__empty";
+      loading.textContent = "Could not load records: " +
+        (err && err.message ? err.message : err);
+    });
+  }
+
+  function closeDrill() {
+    drillState.open = false;
+    document.getElementById("lp-drill").hidden = true;
+    document.getElementById("lp-scrim").hidden = true;
+    if (drillState.lastFocus && drillState.lastFocus.focus) {
+      drillState.lastFocus.focus();
+    }
+  }
+
+  /**
+   * The records behind one point.
+   *
+   * WIRE ME: build a COQL query from the series' module + the period and run
+   * it through ZOHO.CRM.API.coql. The criteria depends on your date fields,
+   * so it is left to you:
+   *
+   *   return ZOHO.CRM.API.coql({ select_query:
+   *     "select Deal_Name, Amount, Closing_Date from Deals " +
+   *     "where Closing_Date between '" + from + "' and '" + to + "' limit 8"
+   *   }).then(function (r) { return (r.data || []).map(toRow); });
+   */
+  function fetchDrillRows(series, period) {
+    var mod = (series.drill && series.drill.module) || "Deals";
+
+    if (!CONFIG.useMockData && window.ZOHO && ZOHO.CRM && ZOHO.CRM.API && ZOHO.CRM.API.coql) {
+      return Promise.reject(new Error("drill-through query not wired — see fetchDrillRows()"));
+    }
+
+    /* sample rows so the interaction is demonstrable before wiring */
+    var rnd = seeded(period.length * 7919 + mod.length * 31 + state.year);
+    var firms = ["Northwind", "Acme Industrial", "Belmont Group", "Cirrus Labs",
+                 "Dorset Retail", "Everline", "Fairmont Health", "Grayson Co"];
+    var stages = ["Negotiation", "Proposal", "Qualification", "Closed Won"];
+    var rows = [];
+
+    for (var i = 0; i < Math.min(CONFIG.drillLimit, firms.length); i++) {
+      rows.push({
+        id: null,
+        module: mod,
+        name: firms[i],
+        meta: stages[Math.floor(rnd() * stages.length)] + " · " + period,
+        amount: fmtCurrency(Math.round(18000 + rnd() * 220000))
+      });
+    }
+    return Promise.resolve(rows);
+  }
+
+  /* ======================================================================
+     8. Boot & Zoho wiring
+     ====================================================================== */
+
+  var state = { year: new Date().getFullYear(), scope: "all" };
+  var lastData = null;
+
+  function setStatus(message, tone) {
+    var bar = document.getElementById("lp-status");
+    if (!message) { bar.hidden = true; return; }
+    bar.textContent = message;
+    bar.setAttribute("data-tone", tone || "info");
+    bar.hidden = false;
+  }
+
+  function markStale(stale) {
+    /* refetch keeps the frame: hold the previous render, dimmed */
+    document.querySelectorAll(".lp-chart").forEach(function (c) {
+      c.classList.toggle("is-stale", stale);
+    });
+    document.getElementById("lp-refresh").classList.toggle("is-busy", stale);
+  }
+
+  /** Rebuild every section from the data already in hand (no refetch). */
+  function rerender() {
+    if (!lastData) return;
+    mounted.length = 0;
+
+    renderScorecard(lastData);
+    renderPerformance(lastData);
+    renderPipeline(lastData);
+    renderBookings(lastData);
+    renderChannel(lastData);
+
+    drawAll();
+    syncZoomChip();
+    resizeWidget();
+  }
+
+  function load() {
+    markStale(true);
+
+    return fetchData(state.year, state.scope).then(function (d) {
+      lastData = d;
+      VIEW.range = null;          // a new slice invalidates the old zoom
+
+      document.getElementById("lp-period").textContent = periodLabel(state.year);
+      rerender();
+
+      markStale(false);
+      setStatus(
+        CONFIG.useMockData
+          ? "Showing sample data — wire Zoho Analytics in script.js § 4.2 and set CONFIG.useMockData = false."
+          : null,
+        "warn"
+      );
+    }).catch(function (err) {
+      markStale(false);
+      setStatus("Could not load data: " + (err && err.message ? err.message : err), "error");
+    });
+  }
+
+  function syncZoomChip() {
+    var chip = document.getElementById("lp-zoom-reset");
+    if (!chip) return;
+    if (!VIEW.range || !lastData) { chip.hidden = true; return; }
+    var win = windowFor(lastData.year);
+    chip.hidden = false;
+    document.getElementById("lp-zoom-label").textContent =
+      win.all[win.start] + "–" + win.all[win.end];
+  }
+
+  function resizeWidget() {
+    if (!window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.UI || !ZOHO.CRM.UI.Resize) return;
+    var h = document.getElementById("lp-root").scrollHeight + 24;
+    try { ZOHO.CRM.UI.Resize({ height: h + "px", width: "100%" }); } catch (e) { /* noop */ }
+  }
+
+  function initFilters() {
+    var yearSel = document.getElementById("lp-year");
+    var thisYear = new Date().getFullYear();
+    for (var y = thisYear; y > thisYear - CONFIG.yearsBack; y--) {
+      var opt = document.createElement("option");
+      opt.value = String(y);
+      opt.textContent = String(y);
+      yearSel.appendChild(opt);
+    }
+    yearSel.value = String(state.year);
+
+    yearSel.addEventListener("change", function () {
+      state.year = parseInt(yearSel.value, 10);
+      load();
+    });
+
+    document.getElementById("lp-scope").addEventListener("change", function (e) {
+      state.scope = e.target.value;
+      load();
+    });
+
+    document.getElementById("lp-refresh").addEventListener("click", load);
+
+    /* analysis toggles — they scope every chart below them */
+    [["lp-t-compare", "compare"], ["lp-t-target", "target"], ["lp-t-trend", "trend"]]
+      .forEach(function (pair) {
+        var btn = document.getElementById(pair[0]);
+        if (!btn) return;
+        btn.addEventListener("click", function () {
+          VIEW[pair[1]] = !VIEW[pair[1]];
+          btn.setAttribute("aria-pressed", String(VIEW[pair[1]]));
+          rerender();
+        });
+      });
+
+    document.getElementById("lp-zoom-reset").addEventListener("click", function () {
+      VIEW.range = null;
+      rerender();
+    });
+
+    document.getElementById("lp-drill-close").addEventListener("click", closeDrill);
+    document.getElementById("lp-scrim").addEventListener("click", closeDrill);
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && drillState.open) closeDrill();
+    });
+  }
+
+  var booted = false;
+
+  function boot() {
+    if (booted) return;
+    booted = true;
+    initFilters();
+    load();
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    if (!window.ZOHO || !ZOHO.embeddedApp) {
+      boot();                       // opened directly, outside CRM
+      return;
+    }
+
+    ZOHO.embeddedApp.on("PageLoad", function () {
+      /* pick up the org currency so tiles read in the right symbol */
+      if (ZOHO.CRM && ZOHO.CRM.CONFIG && ZOHO.CRM.CONFIG.getOrgInfo) {
+        ZOHO.CRM.CONFIG.getOrgInfo().then(function (org) {
+          var sym = org && org.__zoho_crm_org && org.__zoho_crm_org.currency_symbol;
+          if (sym) CONFIG.currency = sym;
+        }).catch(function () { /* keep the default */ })
+          .then(boot);
+      } else {
+        boot();
+      }
+    });
+
+    try { ZOHO.embeddedApp.init(); } catch (e) { boot(); }
+
+    /* PageLoad only fires inside CRM. Locally the SDK still loads from the
+       CDN, so without this the dashboard would sit blank forever. */
+    setTimeout(boot, 1500);
+  });
+
+})();

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lead Performance 360</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div class="lp-root" id="lp-root">
+
+    <!-- ============ Top bar ============ -->
+    <header class="lp-topbar">
+      <div class="lp-topbar__title">
+        <h1>Lead Performance 360</h1>
+        <p class="lp-topbar__sub" id="lp-period">&nbsp;</p>
+      </div>
+
+      <!-- Filters: one row, above everything they scope -->
+      <div class="lp-filters" id="lp-filters">
+        <label class="lp-field">
+          <span class="lp-field__label">Year</span>
+          <select class="lp-select" id="lp-year"></select>
+        </label>
+        <label class="lp-field">
+          <span class="lp-field__label">Scope</span>
+          <select class="lp-select" id="lp-scope">
+            <option value="all">All records</option>
+            <option value="mine">My records</option>
+            <option value="team">My team</option>
+          </select>
+        </label>
+
+        <!-- Analysis overlays. These scope every chart below them. -->
+        <div class="lp-field">
+          <span class="lp-field__label">Analysis</span>
+          <div class="lp-chips" role="group" aria-label="Analysis overlays">
+            <button class="lp-chip" id="lp-t-compare" type="button" aria-pressed="false"
+                    title="Draw last year's actuals as a ghost line">vs Last year</button>
+            <button class="lp-chip" id="lp-t-target" type="button" aria-pressed="false"
+                    title="Draw the quota line and shade any shortfall">Target</button>
+            <button class="lp-chip" id="lp-t-trend" type="button" aria-pressed="false"
+                    title="Least-squares fit over the visible range">Trend</button>
+          </div>
+        </div>
+
+        <!-- Appears once a chart has been brushed; clears the linked zoom. -->
+        <button class="lp-chip lp-chip--zoom" id="lp-zoom-reset" type="button" hidden>
+          Zoomed <span id="lp-zoom-label"></span> — reset
+        </button>
+
+        <button class="lp-btn" id="lp-refresh" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true" class="lp-btn__icon">
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.61-3.89" fill="none" stroke="currentColor"
+                  stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M13.5 2.5V5.5H10.5" fill="none" stroke="currentColor"
+                  stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <!-- Non-blocking status line (loading / mock-data / error) -->
+    <div class="lp-status" id="lp-status" role="status" hidden></div>
+
+    <main class="lp-main" id="lp-main">
+
+      <!-- ============ Section 1 — YTD scorecard ============ -->
+      <section class="lp-section" aria-labelledby="sec-ytd">
+        <div class="lp-section__head">
+          <h2 class="lp-section__title" id="sec-ytd">YTD</h2>
+          <span class="lp-section__note" id="lp-ytd-note"></span>
+        </div>
+        <div class="lp-scorecard" id="ytd-tiles"></div>
+      </section>
+
+      <!-- ============ Section 2 — Performance trends ============ -->
+      <section class="lp-section" aria-labelledby="sec-perf">
+        <h2 class="lp-section__title lp-sr-only" id="sec-perf">Performance</h2>
+        <div class="lp-grid lp-grid--2" id="perf-charts"></div>
+      </section>
+
+      <!-- ============ Section 3 — Pipeline &amp; loss ============ -->
+      <section class="lp-section" aria-labelledby="sec-pipe">
+        <h2 class="lp-section__title lp-sr-only" id="sec-pipe">Pipeline and loss</h2>
+        <div class="lp-scorecard lp-scorecard--strip" id="pipeline-tiles"></div>
+      </section>
+
+      <!-- ============ Section 4 — Bookings &amp; PSE ============ -->
+      <section class="lp-section" aria-labelledby="sec-book">
+        <h2 class="lp-section__title lp-sr-only" id="sec-book">Bookings and closures</h2>
+        <div class="lp-grid lp-grid--2" id="bookings-charts"></div>
+      </section>
+
+      <!-- ============ Section 5 — Guided selling vs self service ============ -->
+      <section class="lp-section" aria-labelledby="sec-chan">
+        <h2 class="lp-section__title lp-sr-only" id="sec-chan">Guided selling and self service</h2>
+        <div class="lp-grid lp-grid--2" id="channel-charts"></div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Shared tooltip layer for every chart -->
+  <div class="lp-tip" id="lp-tip" role="tooltip" hidden></div>
+
+  <!-- Drill-through: the records behind a clicked point -->
+  <div class="lp-scrim" id="lp-scrim" hidden></div>
+  <aside class="lp-drill" id="lp-drill" role="dialog" aria-modal="true"
+         aria-labelledby="lp-drill-title" hidden>
+    <header class="lp-drill__head">
+      <div>
+        <h2 class="lp-drill__title" id="lp-drill-title"></h2>
+        <p class="lp-drill__sub" id="lp-drill-sub"></p>
+      </div>
+      <button class="lp-drill__close" id="lp-drill-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor"
+                stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </header>
+    <div class="lp-drill__body" id="lp-drill-body"></div>
+  </aside>
+
+  <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
