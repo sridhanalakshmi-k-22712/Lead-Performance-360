@@ -568,13 +568,10 @@ body {
 .lp-table th,
 .lp-table td {
   padding: 6px 9px;
-  text-align: right;
+  text-align: center;
   white-space: nowrap;
   border-bottom: 1px solid var(--z-hairline);
 }
-
-.lp-table th:first-child,
-.lp-table td:first-child { text-align: left; }
 
 .lp-table thead th {
   font-weight: 600;
