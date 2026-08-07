@@ -618,6 +618,7 @@
   /* Mixed units — every option stays faceted. */
   var PANEL_TYPES = [
     { id: "panel-bar",  label: "Bars" },
+    { id: "panel-hist", label: "Histogram" },
     { id: "panel-line", label: "Lines" },
     { id: "panel-area", label: "Area" }
   ];
@@ -1095,7 +1096,11 @@
   ---------------------------------------------------------------------- */
 
   function drawPanels(host, spec, live, width, variant) {
-    var isBar = variant === "bar";
+    /* "hist" is the same column mark filling its whole band, so neighbours
+       read as one continuous block — the histogram look. It keeps the 2px
+       surface gap that separates every touching mark in this system. */
+    var isHist = variant === "hist";
+    var isBar = variant === "bar" || isHist;
     var isArea = variant === "area";
 
     var headH = 15, plotH = 52, gapH = 14, axisH = 20;
@@ -1110,7 +1115,12 @@
       : function (i) { return pad.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1)); };
 
     var band = plotW / Math.max(1, n);
-    var barW = Math.max(3, Math.min(18, band * 0.6));
+    var barW = isHist
+      ? Math.max(2, band - 2)                      // full band, less the gap
+      : Math.max(3, Math.min(18, band * 0.6));
+    /* a full-width column has no room to spare, so its ghost and tick stay
+       inside the band instead of spilling over the neighbours */
+    var overhang = isHist ? 0 : 2;
 
     var svg = el("svg", {
       viewBox: "0 0 " + width + " " + height,
@@ -1224,8 +1234,11 @@
         if (VIEW.compare && s.compare) {
           s.compare.forEach(function (v, i) {
             if (v == null) return;
+            /* painted first, so only the part standing above this year's
+               column stays visible — that overhang IS the comparison */
             svg.appendChild(el("path", {
-              d: barPath(x(i) - barW / 2 - 2, y(v), barW + 4, baseY - y(v), 3),
+              d: barPath(x(i) - barW / 2 - overhang, y(v),
+                         barW + overhang * 2, baseY - y(v), 3),
               fill: cssVar(s.hue), "fill-opacity": ".18"
             }));
           });
@@ -1241,7 +1254,8 @@
           s.target.forEach(function (t, i) {
             if (t == null) return;
             svg.appendChild(el("line", {
-              x1: x(i) - barW / 2 - 2, x2: x(i) + barW / 2 + 2, y1: y(t), y2: y(t),
+              x1: x(i) - barW / 2 - overhang, x2: x(i) + barW / 2 + overhang,
+              y1: y(t), y2: y(t),
               stroke: cssVar("--z-ink"), "stroke-width": 1.75,
               "stroke-opacity": ".75", "stroke-linecap": "round"
             }));
@@ -1836,7 +1850,8 @@
 
     var type = currentType(spec);
     var barLike = type === "bar" || type === "stacked" || type === "share" ||
-                  type === "panel-bar" || type === "stack-area";
+                  type === "panel-bar" || type === "panel-hist" ||
+                  type === "stack-area";
 
     /* Which analysis overlays are actually on screen for this chart. Their
        encodings need decoding, so they get legend keys of their own —
