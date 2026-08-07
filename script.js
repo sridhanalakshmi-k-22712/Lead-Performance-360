@@ -494,15 +494,19 @@
    */
   function plotMax(list) {
     var m = 0;
+    var targeted = false;
     list.forEach(function (s) {
       var pools = [s.values];
       if (VIEW.compare && s.compare) pools.push(s.compare);
-      if (VIEW.target && s.target) pools.push(s.target);
+      if (VIEW.target && s.target) { pools.push(s.target); targeted = true; }
       pools.forEach(function (arr) {
         arr.forEach(function (v) { if (v != null && v > m) m = v; });
       });
     });
-    return m;
+    /* A quota is often a round number that lands exactly on the ceiling,
+       pinning its marker to the top gridline where it reads as chrome.
+       A little headroom keeps the reference line legible as data. */
+    return targeted ? m * 1.06 : m;
   }
 
   /**
@@ -593,7 +597,65 @@
     return -1;
   }
 
-  /* ---- 5.2 Dispatcher -------------------------------------------------- */
+  /* ---- 5.2 Chart types & dispatcher ------------------------------------
+
+     Each card offers a few forms of the same data. The choice lives in
+     CHART_TYPE keyed by the card, so it survives a re-render (filter change,
+     zoom, overlay toggle) instead of snapping back to the default.
+
+     Which forms a card may offer is not cosmetic — it follows the units:
+       · series sharing a unit   -> line / area / grouped bars / stacked
+       · series of MIXED units   -> faceted panels only. There is no option
+                                    here that puts them on one axis, because
+                                    that would need a second y-scale.
+       · stacked & 100% share    -> only where the parts genuinely sum to a
+                                    meaningful whole (channel mix), never for
+                                    unrelated series like booked vs churned.
+  ---------------------------------------------------------------------- */
+
+  var CHART_TYPE = {};
+
+  /* Mixed units — every option stays faceted. */
+  var PANEL_TYPES = [
+    { id: "panel-bar",  label: "Bars" },
+    { id: "panel-line", label: "Lines" },
+    { id: "panel-area", label: "Area" }
+  ];
+
+  /* Same unit, but the series are independent quantities — comparison forms
+     only. No stacking: booked + churned is not a meaningful total. */
+  var SERIES_TYPES = [
+    { id: "bar",  label: "Bars" },
+    { id: "line", label: "Line" },
+    { id: "area", label: "Area" }
+  ];
+
+  /* Rates that share an axis. Stacking percentages of different denominators
+     would invent a total, so it is not offered. */
+  var RATE_TYPES = [
+    { id: "line", label: "Line" },
+    { id: "bar",  label: "Bars" },
+    { id: "area", label: "Area" }
+  ];
+
+  /* Channel mix: the parts really do sum to the whole, so part-to-whole
+     forms are legitimate here and nowhere else on this dashboard. */
+  var MIX_TYPES = [
+    { id: "stacked",    label: "Stacked" },
+    { id: "share",      label: "100%" },
+    { id: "bar",        label: "Grouped" },
+    { id: "stack-area", label: "Area" }
+  ];
+
+  /* stacking is part-to-whole; overlays on top of a stack are meaningless */
+  function supportsOverlays(type) {
+    return type !== "stacked" && type !== "share" && type !== "stack-area";
+  }
+
+  function currentType(spec) {
+    return CHART_TYPE[spec.key] || spec.defaultType ||
+      (spec.mode === "panels" ? "panel-bar" : "line");
+  }
 
   function draw(host) {
     var spec = host.__spec;
@@ -617,8 +679,40 @@
       return;
     }
 
-    if (spec.mode === "panels") drawPanels(host, spec, live, width);
-    else drawOverlay(host, spec, live, width);
+    var type = currentType(spec);
+
+    if (type.indexOf("panel-") === 0) {
+      drawPanels(host, spec, live, width, type.slice(6));
+    } else if (type === "bar" || type === "stacked" || type === "share") {
+      drawBars(host, spec, live, width, type);
+    } else {
+      drawOverlay(host, spec, live, width, type);
+    }
+  }
+
+  /* ---- 5.2b Bar geometry ----------------------------------------------- */
+
+  /** Column with a 4px rounded cap and a square foot on the baseline. */
+  function barPath(x, y, w, h, r) {
+    if (h <= 0) h = 0;
+    r = Math.min(r, w / 2, h);
+    var b = y + h;
+    return "M" + x + " " + b +
+           "V" + (y + r) +
+           "Q" + x + " " + y + " " + (x + r) + " " + y +
+           "H" + (x + w - r) +
+           "Q" + (x + w) + " " + y + " " + (x + w) + " " + (y + r) +
+           "V" + b + "Z";
+  }
+
+  /** Slot widths for a band: cap thickness, never fill the band. */
+  function barMetrics(plotW, n, seriesCount) {
+    var band = plotW / Math.max(1, n);
+    var inner = band * 0.68;                 // leave the rest as air
+    var gap = seriesCount > 1 ? 2 : 0;       // 2px surface gap between bars
+    var w = Math.max(3, Math.min(24, (inner - gap * (seriesCount - 1)) / seriesCount));
+    var groupW = w * seriesCount + gap * (seriesCount - 1);
+    return { band: band, w: w, gap: gap, groupW: groupW };
   }
 
   /* ---- 5.3 Overlay: several series, ONE shared y-scale ----------------
@@ -626,15 +720,34 @@
      drawPanels instead — this codebase has no dual-axis path.
   ---------------------------------------------------------------------- */
 
-  function drawOverlay(host, spec, live, width) {
+  function drawOverlay(host, spec, live, width, type) {
     var fmt = formatter(spec.valueFormat);
+    var isArea = type === "area";
+    var isStackArea = type === "stack-area";
+
+    /* Running totals for the stacked-area form. Two overlapping washes read
+       as a muddy third colour, so a part-to-whole area chart stacks into
+       bands instead of layering transparencies. */
+    var cum = null;
+    if (isStackArea) {
+      cum = live.map(function () { return []; });
+      for (var ci = 0; ci < spec.labels.length; ci++) {
+        var run = 0, seen = false;
+        live.forEach(function (s, si) {
+          if (s.values[ci] != null) { run += s.values[ci]; seen = true; }
+          cum[si][ci] = seen ? run : null;
+        });
+      }
+    }
     var pad = { t: 12, r: 64, b: 24, l: 52 };
     var height = 210;
     var plotW = width - pad.l - pad.r;
     var plotH = height - pad.t - pad.b;
     var n = spec.labels.length;
 
-    var scale = niceScale(plotMax(live), 4);
+    /* a stack is measured by its total, not by its tallest part */
+    var scale = niceScale(
+      isStackArea ? plotMax([{ values: cum[cum.length - 1] }]) : plotMax(live), 4);
     var x = function (i) { return pad.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1)); };
     var y = function (v) { return pad.t + plotH - (v / scale.max) * plotH; };
 
@@ -714,25 +827,47 @@
       });
     }
 
-    /* a single series gets an area wash; multiples stay as clean lines */
-    if (live.length === 1) {
-      svg.appendChild(el("path", {
-        d: areaPath(live[0].values, x, y, pad.t + plotH),
-        fill: cssVar(live[0].hue), "fill-opacity": ".10", stroke: "none"
-      }));
-    }
+    if (isStackArea) {
+      /* Paint from the top of the stack downwards: each band's own fill
+         covers the one above it, leaving exactly its own slice visible. The
+         2px surface-coloured top edge is the gap that separates them. */
+      for (var k = live.length - 1; k >= 0; k--) {
+        svg.appendChild(el("path", {
+          d: areaPath(cum[k], x, y, pad.t + plotH),
+          fill: cssVar(live[k].hue), "fill-opacity": ".92", stroke: "none"
+        }));
+        svg.appendChild(el("path", {
+          d: linePath(cum[k], x, y),
+          fill: "none", stroke: cssVar("--z-surface"), "stroke-width": 2,
+          "stroke-linejoin": "round"
+        }));
+      }
+    } else {
+      /* A single series always gets an area wash; multiples only when the
+         reader has explicitly asked for the area form. */
+      if (isArea || live.length === 1) {
+        live.forEach(function (s) {
+          svg.appendChild(el("path", {
+            d: areaPath(s.values, x, y, pad.t + plotH),
+            fill: cssVar(s.hue),
+            "fill-opacity": live.length > 1 ? ".13" : ".10",
+            stroke: "none"
+          }));
+        });
+      }
 
-    live.forEach(function (s) {
-      svg.appendChild(el("path", {
-        d: linePath(s.values, x, y),
-        fill: "none", stroke: cssVar(s.hue), "stroke-width": 2,
-        "stroke-linecap": "round", "stroke-linejoin": "round"
-      }));
-    });
+      live.forEach(function (s) {
+        svg.appendChild(el("path", {
+          d: linePath(s.values, x, y),
+          fill: "none", stroke: cssVar(s.hue), "stroke-width": 2,
+          "stroke-linecap": "round", "stroke-linejoin": "round"
+        }));
+      });
+    }
 
     /* end dots — 2px surface ring so crossings stay legible */
     var ends = [];
-    live.forEach(function (s) {
+    if (!isStackArea) live.forEach(function (s) {
       var i = lastIndex(s.values);
       if (i < 0) return;
       svg.appendChild(el("circle", {
@@ -761,7 +896,191 @@
     }
 
     attachInteractions(svg, spec, live, {
-      x: x, n: n, pad: pad, plotW: plotW, plotH: plotH, fmt: fmt, yShared: y
+      x: x, n: n, pad: pad, plotW: plotW, plotH: plotH, fmt: fmt,
+      /* stacked bands sit at cumulative heights, so a dot at the raw value
+         would float off its own band — the crosshair carries it instead */
+      yShared: isStackArea ? null : y
+    });
+
+    host.appendChild(svg);
+  }
+
+  /* ---- 5.3b Bars: grouped columns, stacks, and 100% share -------------
+     One shared y-scale, same as the line form — only ever called with
+     series that share a unit.
+  ---------------------------------------------------------------------- */
+
+  function drawBars(host, spec, live, width, mode) {
+    var stacked = mode === "stacked" || mode === "share";
+    var share = mode === "share";
+    var fmt = share ? fmtPercent : formatter(spec.valueFormat);
+    var withOverlays = supportsOverlays(mode);
+
+    var pad = { t: 12, r: stacked ? 20 : 56, b: 24, l: 52 };
+    var height = 210;
+    var plotW = width - pad.l - pad.r;
+    var plotH = height - pad.t - pad.b;
+    var n = spec.labels.length;
+
+    /* stacks scale on the column total; groups on the tallest single bar */
+    var ceiling;
+    if (share) {
+      ceiling = 100;
+    } else if (stacked) {
+      ceiling = 0;
+      for (var i = 0; i < n; i++) {
+        var t = 0;
+        live.forEach(function (s) { if (s.values[i] != null) t += s.values[i]; });
+        if (t > ceiling) ceiling = t;
+      }
+    } else {
+      ceiling = plotMax(withOverlays ? live : live.map(function (s) {
+        return { values: s.values };
+      }));
+    }
+
+    var scale = share
+      ? { max: 100, ticks: [0, 25, 50, 75, 100] }
+      : niceScale(ceiling, 4);
+
+    var x = function (i) { return pad.l + (plotW * (i + 0.5)) / Math.max(1, n); };
+    var y = function (v) { return pad.t + plotH - (v / scale.max) * plotH; };
+
+    var svg = el("svg", {
+      viewBox: "0 0 " + width + " " + height,
+      width: width, height: height, tabindex: "0",
+      role: "img", "aria-label": spec.ariaLabel || spec.title || "chart"
+    });
+
+    scale.ticks.forEach(function (t) {
+      svg.appendChild(el("line", {
+        x1: pad.l, x2: pad.l + plotW, y1: y(t), y2: y(t),
+        stroke: t === 0 ? cssVar("--baseline") : cssVar("--grid"), "stroke-width": 1
+      }));
+      var lbl = el("text", {
+        x: pad.l - 8, y: y(t) + 3.5, "text-anchor": "end",
+        fill: cssVar("--z-ink-3"), "font-size": "10"
+      });
+      lbl.style.fontVariantNumeric = "tabular-nums";
+      lbl.textContent = fmt(t);
+      svg.appendChild(lbl);
+    });
+
+    var every = Math.ceil(n / Math.max(2, Math.floor(plotW / 42)));
+    spec.labels.forEach(function (label, i) {
+      if (i % every !== 0 && i !== n - 1) return;
+      var t = el("text", {
+        x: x(i), y: pad.t + plotH + 15, "text-anchor": "middle",
+        fill: cssVar("--z-ink-3"), "font-size": "10"
+      });
+      t.textContent = label;
+      svg.appendChild(t);
+    });
+
+    var m = barMetrics(plotW, n, stacked ? 1 : live.length);
+    var baseY = pad.t + plotH;
+
+    if (stacked) {
+      for (var bi = 0; bi < n; bi++) {
+        /* normalise the column for the 100% form */
+        var total = 0;
+        live.forEach(function (s) { if (s.values[bi] != null) total += s.values[bi]; });
+        if (share && total <= 0) continue;
+
+        var cursor = 0;
+        var parts = [];
+        live.forEach(function (s) {
+          var raw = s.values[bi];
+          if (raw == null) return;
+          var v = share ? (raw / total) * 100 : raw;
+          parts.push({ s: s, v: v, from: cursor });
+          cursor += v;
+        });
+
+        parts.forEach(function (p, pi) {
+          var yTop = y(p.from + p.v);
+          var yBot = y(p.from);
+          var h = yBot - yTop;
+          /* 2px surface gap between touching segments does the separating */
+          if (pi < parts.length - 1) h = Math.max(0, h - 2);
+          var isTop = pi === parts.length - 1;
+          svg.appendChild(el("path", {
+            d: barPath(x(bi) - m.w / 2, yBot - h, m.w, h, isTop ? 4 : 0),
+            fill: cssVar(p.s.hue)
+          }));
+        });
+      }
+    } else {
+      live.forEach(function (s, si) {
+        var offset = -m.groupW / 2 + si * (m.w + m.gap);
+
+        /* prior year sits behind as a translucent ghost column */
+        if (withOverlays && VIEW.compare && s.compare) {
+          s.compare.forEach(function (v, i) {
+            if (v == null) return;
+            svg.appendChild(el("path", {
+              d: barPath(x(i) + offset - 2, y(v), m.w + 4, baseY - y(v), 4),
+              fill: cssVar(s.hue), "fill-opacity": ".18"
+            }));
+          });
+        }
+
+        s.values.forEach(function (v, i) {
+          if (v == null) return;
+          svg.appendChild(el("path", {
+            d: barPath(x(i) + offset, y(v), m.w, baseY - y(v), 4),
+            fill: cssVar(s.hue)
+          }));
+        });
+
+        /* target as a bullet-chart tick laid across each column */
+        if (withOverlays && VIEW.target && s.target) {
+          s.target.forEach(function (t, i) {
+            if (t == null) return;
+            svg.appendChild(el("line", {
+              x1: x(i) + offset - 2, x2: x(i) + offset + m.w + 2,
+              y1: y(t), y2: y(t),
+              stroke: cssVar("--z-ink"), "stroke-width": 2,
+              "stroke-opacity": ".75", "stroke-linecap": "round"
+            }));
+          });
+        }
+
+        if (withOverlays && VIEW.trend) {
+          var fit = linearFit(s.values);
+          if (fit) {
+            var v0 = Math.max(0, Math.min(scale.max, fit.b));
+            var v1 = Math.max(0, Math.min(scale.max, fit.m * (n - 1) + fit.b));
+            svg.appendChild(el("line", {
+              x1: x(0), y1: y(v0), x2: x(n - 1), y2: y(v1),
+              stroke: cssVar(s.hue), "stroke-width": 1.5, "stroke-opacity": ".5",
+              "stroke-dasharray": "10 5", "stroke-linecap": "round"
+            }));
+          }
+        }
+      });
+
+      /* label the final column of each series — sparing, and only when the
+         column is wide enough that the text is not wider than its mark */
+      if (m.w >= 16) {
+        live.forEach(function (s, si) {
+          var li = lastIndex(s.values);
+          if (li < 0) return;
+          var offset = -m.groupW / 2 + si * (m.w + m.gap);
+          var t = el("text", {
+            x: x(li) + offset + m.w / 2, y: y(s.values[li]) - 6,
+            "text-anchor": "middle",
+            fill: cssVar("--z-ink-2"), "font-size": "10", "font-weight": "600"
+          });
+          t.textContent = fmt(s.values[li]);
+          svg.appendChild(t);
+        });
+      }
+    }
+
+    attachInteractions(svg, spec, live, {
+      x: x, n: n, pad: pad, plotW: plotW, plotH: plotH, fmt: fmt,
+      bandW: m.band, share: share
     });
 
     host.appendChild(svg);
@@ -770,17 +1089,28 @@
   /* ---- 5.4 Panels: small multiples, one scale EACH --------------------
      The honest answer to "Revenue, Customers and Leads on one chart": three
      stacked panels sharing an x-axis, each with its own y-scale. One
-     crosshair spans all three, so the reader still compares at a glance.
+     crosshair spans them all, so the reader still compares at a glance.
+     `variant` picks the mark — line, bar or area — without ever merging the
+     panels onto a shared scale.
   ---------------------------------------------------------------------- */
 
-  function drawPanels(host, spec, live, width) {
+  function drawPanels(host, spec, live, width, variant) {
+    var isBar = variant === "bar";
+    var isArea = variant === "area";
+
     var headH = 15, plotH = 52, gapH = 14, axisH = 20;
     var pad = { t: 6, r: 14, l: 52 };
     var plotW = width - pad.l - pad.r;
     var n = spec.labels.length;
     var height = pad.t + live.length * (headH + plotH) + (live.length - 1) * gapH + axisH;
 
-    var x = function (i) { return pad.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1)); };
+    /* bars sit in the middle of a band; points sit on the tick */
+    var x = isBar
+      ? function (i) { return pad.l + (plotW * (i + 0.5)) / Math.max(1, n); }
+      : function (i) { return pad.l + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1)); };
+
+    var band = plotW / Math.max(1, n);
+    var barW = Math.max(3, Math.min(18, band * 0.6));
 
     var svg = el("svg", {
       viewBox: "0 0 " + width + " " + height,
@@ -795,16 +1125,24 @@
       var plotTop = top + headH;
       var fmt = formatter(s.format || spec.valueFormat);
       /* 3 candidate ticks lands on a tighter ceiling than 2, so a short panel
-         spends its height on the line instead of on empty headroom. */
+         spends its height on the mark instead of on empty headroom. */
       var scale = niceScale(plotMax([s]), 3);
       var y = function (v) { return plotTop + plotH - (v / scale.max) * plotH; };
+      var baseY = y(0);
 
       panels.push({ s: s, y: y, fmt: fmt, top: plotTop });
 
-      /* panel header: line-key + name on the left, latest value on the right */
-      svg.appendChild(el("rect", {
-        x: pad.l, y: top + 6, width: 10, height: 2, rx: 1, fill: cssVar(s.hue)
-      }));
+      /* panel header: key + name on the left, latest value on the right */
+      if (isBar) {
+        svg.appendChild(el("rect", {
+          x: pad.l, y: top + 3, width: 9, height: 9, rx: 2.5, fill: cssVar(s.hue)
+        }));
+      } else {
+        svg.appendChild(el("rect", {
+          x: pad.l, y: top + 6, width: 10, height: 3, rx: 1.5, fill: cssVar(s.hue)
+        }));
+      }
+
       var name = el("text", {
         x: pad.l + 16, y: top + 10.5,
         fill: cssVar("--z-ink-2"), "font-size": "10.5", "font-weight": "500"
@@ -845,7 +1183,7 @@
         }
       }
 
-      /* baseline + a single mid gridline keeps each panel readable but quiet */
+      /* baseline + a single top gridline keeps each panel readable but quiet */
       [0, scale.max].forEach(function (t) {
         svg.appendChild(el("line", {
           x1: pad.l, x2: pad.l + plotW, y1: y(t), y2: y(t),
@@ -860,8 +1198,8 @@
       tick.textContent = fmt(scale.max);
       svg.appendChild(tick);
 
-      /* --- analysis layer --- */
-      if (VIEW.target && s.target) {
+      /* --- analysis layer, behind the marks --- */
+      if (VIEW.target && s.target && !isBar) {
         svg.appendChild(el("path", {
           d: shortfallPath(s.values, s.target, x, y),
           fill: cssVar("--bad"), "fill-opacity": ".09", stroke: "none"
@@ -873,12 +1211,60 @@
         }));
       }
 
-      if (VIEW.compare && s.compare) {
+      if (VIEW.compare && s.compare && !isBar) {
         svg.appendChild(el("path", {
           d: linePath(s.compare, x, y),
           fill: "none", stroke: cssVar(s.hue), "stroke-width": 1.5,
           "stroke-opacity": ".4", "stroke-dasharray": "6 3", "stroke-linecap": "round"
         }));
+      }
+
+      /* --- the marks --- */
+      if (isBar) {
+        if (VIEW.compare && s.compare) {
+          s.compare.forEach(function (v, i) {
+            if (v == null) return;
+            svg.appendChild(el("path", {
+              d: barPath(x(i) - barW / 2 - 2, y(v), barW + 4, baseY - y(v), 3),
+              fill: cssVar(s.hue), "fill-opacity": ".18"
+            }));
+          });
+        }
+        s.values.forEach(function (v, i) {
+          if (v == null) return;
+          svg.appendChild(el("path", {
+            d: barPath(x(i) - barW / 2, y(v), barW, baseY - y(v), 3),
+            fill: cssVar(s.hue)
+          }));
+        });
+        if (VIEW.target && s.target) {
+          s.target.forEach(function (t, i) {
+            if (t == null) return;
+            svg.appendChild(el("line", {
+              x1: x(i) - barW / 2 - 2, x2: x(i) + barW / 2 + 2, y1: y(t), y2: y(t),
+              stroke: cssVar("--z-ink"), "stroke-width": 1.75,
+              "stroke-opacity": ".75", "stroke-linecap": "round"
+            }));
+          });
+        }
+      } else {
+        if (isArea) {
+          svg.appendChild(el("path", {
+            d: areaPath(s.values, x, y, baseY),
+            fill: cssVar(s.hue), "fill-opacity": ".14", stroke: "none"
+          }));
+        }
+        svg.appendChild(el("path", {
+          d: linePath(s.values, x, y),
+          fill: "none", stroke: cssVar(s.hue), "stroke-width": 2,
+          "stroke-linecap": "round", "stroke-linejoin": "round"
+        }));
+        if (li >= 0) {
+          svg.appendChild(el("circle", {
+            cx: x(li), cy: y(s.values[li]), r: 3.5,
+            fill: cssVar(s.hue), stroke: cssVar("--z-surface"), "stroke-width": 2
+          }));
+        }
       }
 
       if (VIEW.trend) {
@@ -892,21 +1278,6 @@
             "stroke-dasharray": "10 5", "stroke-linecap": "round"
           }));
         }
-      }
-
-      /* No area wash here: three stacked fills read as solid blocks and
-         bury the line. The panel's own baseline carries the zero. */
-      svg.appendChild(el("path", {
-        d: linePath(s.values, x, y),
-        fill: "none", stroke: cssVar(s.hue), "stroke-width": 2,
-        "stroke-linecap": "round", "stroke-linejoin": "round"
-      }));
-
-      if (li >= 0) {
-        svg.appendChild(el("circle", {
-          cx: x(li), cy: y(s.values[li]), r: 3.5,
-          fill: cssVar(s.hue), stroke: cssVar("--z-surface"), "stroke-width": 2
-        }));
       }
     });
 
@@ -925,7 +1296,7 @@
     attachInteractions(svg, spec, live, {
       x: x, n: n, pad: { t: pad.t, l: pad.l },
       plotW: plotW, plotH: height - pad.t - axisH,
-      panels: panels
+      panels: panels, bandW: isBar ? band : 0
     });
 
     host.appendChild(svg);
@@ -939,18 +1310,28 @@
   ---------------------------------------------------------------------- */
 
   function attachInteractions(svg, spec, live, geo) {
+    /* Bars own their category, so the hover target is the whole band and it
+       lights up; lines get the crosshair + per-series dots instead. */
+    var banded = !!geo.bandW;
+
+    var bandHi = banded ? el("rect", {
+      y: geo.pad.t, height: geo.plotH, width: geo.bandW, x: 0, rx: 6,
+      fill: cssVar("--z-ink"), "fill-opacity": ".05", opacity: "0"
+    }) : null;
+    if (bandHi) svg.appendChild(bandHi);
+
     var crosshair = el("line", {
       y1: geo.pad.t, y2: geo.pad.t + geo.plotH,
       stroke: cssVar("--z-ink-3"), "stroke-width": 1, opacity: "0"
     });
-    svg.appendChild(crosshair);
+    if (!banded) svg.appendChild(crosshair);
 
     var dots = live.map(function (s) {
       var c = el("circle", {
         r: 4, fill: cssVar(s.hue),
         stroke: cssVar("--z-surface"), "stroke-width": 2, opacity: "0"
       });
-      svg.appendChild(c);
+      if (!banded) svg.appendChild(c);
       return c;
     });
 
@@ -977,20 +1358,30 @@
       return (evt.clientX - box.left) / k;
     }
 
-    function nearest(evt) {
-      var t = geo.n === 1 ? 0
-        : (localX(evt) - geo.pad.l) / (geo.plotW / (geo.n - 1));
-      return Math.max(0, Math.min(geo.n - 1, Math.round(t)));
+    /** Category index under a plot-local x, for point and band layouts. */
+    function indexAtX(lx) {
+      var t = banded
+        ? Math.floor((lx - geo.pad.l) / geo.bandW)
+        : (geo.n === 1 ? 0
+            : Math.round((lx - geo.pad.l) / (geo.plotW / (geo.n - 1))));
+      return Math.max(0, Math.min(geo.n - 1, t));
     }
+
+    function nearest(evt) { return indexAtX(localX(evt)); }
 
     function show(i, clientX, clientY) {
       if (i < 0 || i >= geo.n) return;
       active = i;
 
       var px = geo.x(i);
-      crosshair.setAttribute("x1", px);
-      crosshair.setAttribute("x2", px);
-      crosshair.setAttribute("opacity", ".45");
+      if (banded) {
+        bandHi.setAttribute("x", px - geo.bandW / 2);
+        bandHi.setAttribute("opacity", "1");
+      } else {
+        crosshair.setAttribute("x1", px);
+        crosshair.setAttribute("x2", px);
+        crosshair.setAttribute("opacity", ".45");
+      }
 
       var rows = [];
       live.forEach(function (s, si) {
@@ -998,11 +1389,13 @@
         var yFn = geo.panels ? geo.panels[si].y : geo.yShared;
         var f = geo.panels ? geo.panels[si].fmt : geo.fmt;
 
-        if (v == null || !yFn) dots[si].setAttribute("opacity", "0");
-        else {
-          dots[si].setAttribute("cx", px);
-          dots[si].setAttribute("cy", yFn(v));
-          dots[si].setAttribute("opacity", "1");
+        if (!banded) {
+          if (v == null || !yFn) dots[si].setAttribute("opacity", "0");
+          else {
+            dots[si].setAttribute("cx", px);
+            dots[si].setAttribute("cy", yFn(v));
+            dots[si].setAttribute("opacity", "1");
+          }
         }
 
         /* period-over-period movement, the number the reader actually wants */
@@ -1041,6 +1434,7 @@
 
     function hide() {
       active = -1;
+      if (bandHi) bandHi.setAttribute("opacity", "0");
       crosshair.setAttribute("opacity", "0");
       dots.forEach(function (d) { d.setAttribute("opacity", "0"); });
       hideTip();
@@ -1057,6 +1451,7 @@
         band.setAttribute("opacity", "1");
         hideTip();
         crosshair.setAttribute("opacity", "0");
+        if (bandHi) bandHi.setAttribute("opacity", "0");
         return;
       }
       show(nearest(e), e.clientX, e.clientY);
@@ -1107,11 +1502,8 @@
 
       /* a drag selects a range; a tap opens the records behind the point */
       if (spec.zoomable && d.moved && travelled >= 10) {
-        var step = geo.plotW / Math.max(1, geo.n - 1);
-        var i0 = Math.round((Math.min(d.startX, d.currentX) - geo.pad.l) / step);
-        var i1 = Math.round((Math.max(d.startX, d.currentX) - geo.pad.l) / step);
-        i0 = Math.max(0, Math.min(geo.n - 1, i0));
-        i1 = Math.max(0, Math.min(geo.n - 1, i1));
+        var i0 = indexAtX(Math.min(d.startX, d.currentX));
+        var i1 = indexAtX(Math.max(d.startX, d.currentX));
         if (i1 - i0 >= 1) {
           var base = spec.rangeBase || 0;
           VIEW.range = [base + i0, base + i1];
@@ -1394,34 +1786,79 @@
     }
     head.appendChild(titles);
 
+    var tools = document.createElement("div");
+    tools.className = "lp-card__tools";
+
+    /* chart-form switcher — the options a card offers are constrained by its
+       units (see § 5.2), so nothing here can produce a two-axis chart */
+    var chart = document.createElement("div");
+    chart.className = "lp-chart";
+    chart.__muted = {};
+
+    if (spec.types && spec.types.length > 1) {
+      var seg = document.createElement("div");
+      seg.className = "lp-seg";
+      seg.setAttribute("role", "group");
+      seg.setAttribute("aria-label", "Chart type");
+
+      spec.types.forEach(function (t) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "lp-seg__btn";
+        b.textContent = t.label;
+        b.setAttribute("aria-pressed", String(currentType(spec) === t.id));
+
+        b.addEventListener("click", function () {
+          if (currentType(spec) === t.id) return;
+          CHART_TYPE[spec.key] = t.id;
+          seg.querySelectorAll(".lp-seg__btn").forEach(function (o) {
+            o.setAttribute("aria-pressed", String(o === b));
+          });
+          /* the legend's overlay keys depend on the form, so rebuild the card */
+          rerender();
+        });
+
+        seg.appendChild(b);
+      });
+      tools.appendChild(seg);
+    }
+
     /* every chart keeps a table view — the tooltip enhances, never gates */
     var toggle = document.createElement("button");
     toggle.className = "lp-card__toggle";
     toggle.type = "button";
     toggle.setAttribute("aria-pressed", "false");
     toggle.textContent = "Table";
-    head.appendChild(toggle);
+    tools.appendChild(toggle);
+
+    head.appendChild(tools);
     card.appendChild(head);
 
-    var chart = document.createElement("div");
-    chart.className = "lp-chart";
-    chart.__muted = {};
+    var type = currentType(spec);
+    var barLike = type === "bar" || type === "stacked" || type === "share" ||
+                  type === "panel-bar" || type === "stack-area";
 
     /* Which analysis overlays are actually on screen for this chart. Their
-       dash patterns need decoding, so they get legend keys of their own —
-       otherwise a ghost line is just an unexplained stroke. */
+       encodings need decoding, so they get legend keys of their own —
+       otherwise a ghost mark is just an unexplained stroke. Stacked forms
+       carry no overlays at all, so they advertise none. */
     function anySeriesHas(prop) {
       return spec.series.some(function (s) { return !!s[prop]; });
     }
     var overlayKeys = [];
-    if (VIEW.compare && anySeriesHas("compare")) {
-      overlayKeys.push({ label: spec.compareLabel || "Last year", dash: "6 3", opacity: ".45" });
-    }
-    if (VIEW.target && anySeriesHas("target")) {
-      overlayKeys.push({ label: "Target", dash: "1 4", opacity: ".9" });
-    }
-    if (VIEW.trend) {
-      overlayKeys.push({ label: "Trend", dash: "10 5", opacity: ".6" });
+    if (supportsOverlays(type)) {
+      if (VIEW.compare && anySeriesHas("compare")) {
+        overlayKeys.push({
+          label: spec.compareLabel || "Last year",
+          dash: "6 3", opacity: ".45", ghost: barLike
+        });
+      }
+      if (VIEW.target && anySeriesHas("target")) {
+        overlayKeys.push({ label: "Target", dash: "1 4", opacity: ".9", tick: barLike });
+      }
+      if (VIEW.trend) {
+        overlayKeys.push({ label: "Trend", dash: "10 5", opacity: ".6" });
+      }
     }
 
     var wantsSeriesLegend = spec.mode !== "panels" && spec.series.length >= 2;
@@ -1440,8 +1877,9 @@
         item.setAttribute("aria-pressed", "true");
         item.title = "Show only this series, or hide it";
 
+        /* the legend mirrors the mark: a swatch for bars, a stroke for lines */
         var key = document.createElement("span");
-        key.className = "lp-legend__key";
+        key.className = barLike ? "lp-legend__swatch" : "lp-legend__key";
         key.style.background = cssVar(s.hue);
 
         var name = document.createElement("span");
@@ -1469,17 +1907,27 @@
         var item = document.createElement("span");
         item.className = "lp-legend__item lp-legend__item--overlay";
 
-        /* a dashed stroke in neutral ink: the pattern is the identity here,
-           the hue still belongs to whichever series it trails */
-        var swatch = document.createElementNS(SVG_NS, "svg");
-        swatch.setAttribute("class", "lp-legend__dash");
-        swatch.setAttribute("viewBox", "0 0 16 4");
-        swatch.setAttribute("aria-hidden", "true");
-        swatch.appendChild(el("line", {
-          x1: 0, y1: 2, x2: 16, y2: 2,
-          stroke: cssVar("--z-ink-3"), "stroke-width": 1.5,
-          "stroke-dasharray": o.dash, "stroke-opacity": o.opacity
-        }));
+        /* the key mirrors however this overlay is actually drawn in the
+           current form: a ghost column, a bullet tick, or a dashed stroke */
+        var swatch;
+        if (o.ghost) {
+          swatch = document.createElement("span");
+          swatch.className = "lp-legend__swatch";
+          swatch.style.background = cssVar("--z-ink-3");
+          swatch.style.opacity = ".28";
+        } else {
+          swatch = document.createElementNS(SVG_NS, "svg");
+          swatch.setAttribute("class", "lp-legend__dash");
+          swatch.setAttribute("viewBox", "0 0 16 4");
+          swatch.setAttribute("aria-hidden", "true");
+          swatch.appendChild(el("line", {
+            x1: 0, y1: 2, x2: 16, y2: 2,
+            stroke: cssVar(o.tick ? "--z-ink" : "--z-ink-3"),
+            "stroke-width": o.tick ? 2.5 : 1.5,
+            "stroke-dasharray": o.tick ? "none" : o.dash,
+            "stroke-opacity": o.opacity
+          }));
+        }
 
         var name = document.createElement("span");
         name.textContent = o.label;
@@ -1671,10 +2119,13 @@
     /* Revenue, Customers and Leads do not share a unit — small multiples,
        one y-scale per panel. A single frame here would need two axes. */
     host.appendChild(chartCard({
+      key: "monthly-performance",
       title: "Monthly performance",
       subtitle: windowNote(win) + " " + d.year +
         (VIEW.range ? " · zoomed" : " · year to date"),
       mode: "panels",
+      types: PANEL_TYPES,
+      defaultType: "panel-bar",
       zoomable: true,
       rangeBase: win.start,
       xLabel: "Month",
@@ -1704,9 +2155,12 @@
     }));
 
     host.appendChild(chartCard({
+      key: "quarterly-performance",
       title: "Quarterly performance",
       subtitle: "Q1 – Q4 " + d.year,
       mode: "panels",
+      types: PANEL_TYPES,
+      defaultType: "panel-bar",
       zoomable: false,           // quarters are not on the month axis
       xLabel: "Quarter",
       labels: QUARTERS,
@@ -1777,9 +2231,12 @@
 
     /* Both series are customer counts — same unit, so one shared axis. */
     host.appendChild(chartCard({
+      key: "bookings",
       title: "Churned vs booked customers",
       subtitle: "Number of customers churned from your bookings",
       mode: "overlay",
+      types: SERIES_TYPES,
+      defaultType: "bar",
       valueFormat: "count",
       zoomable: true,
       rangeBase: win.start,
@@ -1804,9 +2261,12 @@
 
     /* All three are percentages — same unit, one axis. */
     host.appendChild(chartCard({
+      key: "pse",
       title: "Monthly PSE's / closures",
       subtitle: "Share of closures, %",
       mode: "overlay",
+      types: RATE_TYPES,
+      defaultType: "line",
       valueFormat: "percent",
       zoomable: true,
       rangeBase: win.start,
@@ -1848,9 +2308,12 @@
     /* Guided selling keeps slot 1 and self service slot 2 in BOTH charts —
        colour follows the entity, so the eye carries across the pair. */
     host.appendChild(chartCard({
+      key: "channel-customers",
       title: "Guided selling vs self service — customers",
       subtitle: windowNote(win) + " " + d.year,
       mode: "overlay",
+      types: MIX_TYPES,
+      defaultType: "stacked",
       valueFormat: "count",
       zoomable: true,
       rangeBase: win.start,
@@ -1873,9 +2336,12 @@
     }));
 
     host.appendChild(chartCard({
+      key: "channel-revenue",
       title: "Guided selling vs self service — revenue",
       subtitle: windowNote(win) + " " + d.year,
       mode: "overlay",
+      types: MIX_TYPES,
+      defaultType: "stack-area",
       valueFormat: "currency",
       zoomable: true,
       rangeBase: win.start,
