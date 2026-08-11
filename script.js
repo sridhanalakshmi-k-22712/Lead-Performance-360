@@ -208,6 +208,7 @@
 
        pipeline:  { qualifiedLostCustomers, lostRevenue,
                     pipelineRevenueQuarter, pipelineRevenueYear,
+                    pipelineOverdue,      // open pipeline past its close date
                     forecastRevenue, attainedRevenue },
        bookings:  { booked:[], churned:[] },
        pse:       { pse:[], revenue:[], customers:[] },        // percentages
@@ -434,6 +435,7 @@
         lostRevenue:            Math.round(386000 * mult),
         pipelineRevenueQuarter: Math.round(1420000 * mult),
         pipelineRevenueYear:    Math.round(5180000 * mult),
+        pipelineOverdue:        Math.round(742000 * mult),
         forecastRevenue:        forecast,
         attainedRevenue:        attained
       },
@@ -2228,6 +2230,14 @@
     host.appendChild(statTile(
       { label: "Pipeline Revenue", format: "currency", note: "FY " + d.year },
       p.pipelineRevenueYear, null
+    ));
+
+    /* Open pipeline whose close date has already passed. Growth here is
+       bad news, so the tile flags the direction the other way round. */
+    host.appendChild(statTile(
+      { label: "Pipeline Overdue", format: "currency",
+        note: "FY " + d.year, upIsGood: false },
+      p.pipelineOverdue, null
     ));
 
     host.appendChild(meterTile(

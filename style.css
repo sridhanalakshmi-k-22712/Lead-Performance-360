@@ -347,7 +347,8 @@ body {
   gap: 14px;
 }
 
-.lp-scorecard--strip { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+/* six across, so the pipeline strip lines up with the YTD scorecard above */
+.lp-scorecard--strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 
 @media (max-width: 1280px) {
   .lp-scorecard,
