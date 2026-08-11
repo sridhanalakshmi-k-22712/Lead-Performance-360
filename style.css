@@ -451,11 +451,24 @@ body {
 
 .lp-meter__legend {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 1px;
   margin-top: 7px;
   font-size: 11.5px;
   color: var(--z-ink-3);
+}
+
+.lp-meter__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lp-meter__row-value {
+  font-weight: 500;
+  color: var(--z-ink-2);
+  font-variant-numeric: tabular-nums;
 }
 
 @media (prefers-reduced-motion: reduce) {

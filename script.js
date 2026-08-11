@@ -38,6 +38,12 @@
     /* How many past years the Year filter offers. */
     yearsBack: 3,
 
+    /* Region / BU filter values. Replace these with your own dimension
+       members — ideally read them from the Analytics dimension or the CRM
+       picklist so the list cannot drift out of sync with the data. */
+    regions: ["North America", "EMEA", "APAC", "India", "LATAM"],
+    businessUnits: ["Enterprise", "Mid-Market", "SMB", "Public Sector"],
+
     /* Set false once § 4.2 is wired to real Analytics data. */
     useMockData: true,
 
@@ -230,7 +236,7 @@
          param_type: 1,
          parameters: {
            CONFIG: JSON.stringify({
-             criteria: '"Year" = ' + year + ' and "Scope" = \'' + scope + '\'',
+             criteria: buildCriteria(year, scope, region, bu),
              responseFormat: "json"
            })
          },
@@ -242,12 +248,26 @@
      `mapAnalyticsRows` so the renderers never learn your column names.
   ---------------------------------------------------------------------- */
 
-  function fetchData(year, scope) {
+  /**
+   * Criteria for the Analytics query. "all" means the dimension is not
+   * constrained, so it contributes no clause at all rather than a clause
+   * matching the literal string "all".
+   */
+  function buildCriteria(year, scope, region, bu) {
+    var parts = ['"Year" = ' + year];
+    if (scope && scope !== "all")   parts.push('"Scope" = \'' + scope + '\'');
+    if (region && region !== "all") parts.push('"Region" = \'' + region + '\'');
+    if (bu && bu !== "all")         parts.push('"BU" = \'' + bu + '\'');
+    return parts.join(" and ");
+  }
+
+  function fetchData(year, scope, region, bu) {
     if (CONFIG.useMockData) {
-      return Promise.resolve(mockData(year, scope));
+      return Promise.resolve(mockData(year, scope, region, bu));
     }
 
-    // TODO: replace with the ZOHO.CRM.CONNECTION.invoke call sketched above.
+    // TODO: replace with the ZOHO.CRM.CONNECTION.invoke call sketched above,
+    // passing buildCriteria(year, scope, region, bu) as the criteria.
     return Promise.reject(new Error(
       "Analytics is not wired yet — see script.js § 4.2"
     ));
@@ -295,11 +315,23 @@
     };
   }
 
-  function mockData(year, scope) {
+  function mockData(year, scope, region, bu) {
+    region = region || "all";
+    bu = bu || "all";
+
     var months = ytdMonths(year);
     var n = months.length;
-    var rnd = seeded(year * 977 + scope.length * 13);
+    var rnd = seeded(year * 977 + scope.length * 13 +
+                     region.length * 101 + bu.length * 37);
+
     var mult = scope === "mine" ? 0.24 : scope === "team" ? 0.62 : 1;
+    /* each selected dimension carves the org down to a slice of itself */
+    if (region !== "all") {
+      mult *= [0.34, 0.27, 0.19, 0.14, 0.06][CONFIG.regions.indexOf(region)] || 0.2;
+    }
+    if (bu !== "all") {
+      mult *= [0.42, 0.3, 0.19, 0.09][CONFIG.businessUnits.indexOf(bu)] || 0.25;
+    }
 
     function series(base, growth, jitter) {
       var out = [];
@@ -1763,16 +1795,28 @@
     track.appendChild(fill);
     meter.appendChild(track);
 
+    /* Two labelled rows rather than one line: at six-across the tile is too
+       narrow for "Attained $316.7K  Forecast $386.2K" to sit side by side,
+       and this keeps the height stable whatever the values read. */
     var legend = document.createElement("div");
     legend.className = "lp-meter__legend";
 
-    var a = document.createElement("span");
-    a.textContent = "Attained " + fmtCurrency(attained);
-    var f = document.createElement("span");
-    f.textContent = "Forecast " + fmtCurrency(forecast);
+    [["Attained", attained], ["Forecast", forecast]].forEach(function (pair) {
+      var row = document.createElement("div");
+      row.className = "lp-meter__row";
 
-    legend.appendChild(a);
-    legend.appendChild(f);
+      var k = document.createElement("span");
+      k.textContent = pair[0];
+
+      var v = document.createElement("span");
+      v.className = "lp-meter__row-value";
+      v.textContent = fmtCurrency(pair[1]);
+
+      row.appendChild(k);
+      row.appendChild(v);
+      legend.appendChild(row);
+    });
+
     meter.appendChild(legend);
     tile.appendChild(meter);
 
@@ -2564,7 +2608,12 @@
      8. Boot & Zoho wiring
      ====================================================================== */
 
-  var state = { year: new Date().getFullYear(), scope: "all" };
+  var state = {
+    year: new Date().getFullYear(),
+    scope: "all",
+    region: "all",
+    bu: "all"
+  };
   var lastData = null;
 
   function setStatus(message, tone) {
@@ -2602,11 +2651,17 @@
   function load() {
     markStale(true);
 
-    return fetchData(state.year, state.scope).then(function (d) {
+    return fetchData(state.year, state.scope, state.region, state.bu)
+      .then(function (d) {
       lastData = d;
       VIEW.range = null;          // a new slice invalidates the old zoom
 
-      document.getElementById("lp-period").textContent = periodLabel(state.year);
+      /* name the active slice, so a filtered number is never mistaken for
+         the whole org */
+      var slice = [periodLabel(state.year)];
+      if (state.region !== "all") slice.push(state.region);
+      if (state.bu !== "all") slice.push(state.bu);
+      document.getElementById("lp-period").textContent = slice.join("  ·  ");
       rerender();
 
       markStale(false);
@@ -2658,6 +2713,34 @@
       state.scope = e.target.value;
       load();
     });
+
+    /* Region and BU. Like every filter in this row they scope EVERYTHING
+       below them, so a change refetches and every card re-renders against
+       the same slice — the numbers can never disagree with each other. */
+    [["lp-region", "region", CONFIG.regions,       "All regions"],
+     ["lp-bu",     "bu",     CONFIG.businessUnits, "All BUs"]]
+      .forEach(function (cfg) {
+        var sel = document.getElementById(cfg[0]);
+        if (!sel) return;
+
+        var all = document.createElement("option");
+        all.value = "all";
+        all.textContent = cfg[3];
+        sel.appendChild(all);
+
+        (cfg[2] || []).forEach(function (name) {
+          var o = document.createElement("option");
+          o.value = name;
+          o.textContent = name;          // untrusted -> textContent
+          sel.appendChild(o);
+        });
+
+        sel.value = state[cfg[1]];
+        sel.addEventListener("change", function () {
+          state[cfg[1]] = sel.value;
+          load();
+        });
+      });
 
     document.getElementById("lp-refresh").addEventListener("click", load);
 
