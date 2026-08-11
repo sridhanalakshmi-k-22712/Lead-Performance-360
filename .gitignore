@@ -2,3 +2,6 @@
 ZET-debug.log
 node_modules/
 dist/
+
+# generated widget packages (run ./build-widget.sh)
+build/
