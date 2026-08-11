@@ -44,8 +44,73 @@
     regions: ["North America", "EMEA", "APAC", "India", "LATAM"],
     businessUnits: ["Enterprise", "Mid-Market", "SMB", "Public Sector"],
 
-    /* Set false once § 4.2 is wired to real Analytics data. */
+    /* Set false once CONFIG.analytics below is filled in. */
     useMockData: true,
+
+    /* ---- Zoho Analytics, reached through a CRM Connection --------------
+       No credential lives here or anywhere else in this file: CRM holds the
+       token and proxies the call. Create the connection under
+       Setup > Developer Hub > Connections with scope ZohoAnalytics.data.read.
+
+       `columns` maps what the dashboard needs (left) to the column names in
+       your Analytics view (right). Change the RIGHT side only. Set any
+       measure you do not have to null and it renders blank instead of wrong.
+       The view contract is documented in § 4.2.
+    -------------------------------------------------------------------- */
+    analytics: {
+      connectionName: "",          // e.g. "zoho_analytics"
+      orgId:          "",          // ZANALYTICS-ORGID
+      workspaceId:    "",
+      viewId:         "",
+      dc:             "com",       // com | in | eu | com.au — your Analytics DC
+
+      columns: {
+        /* dimensions */
+        year:                   "Year",
+        month:                  "Month",          // 1-12
+        region:                 "Region",
+        bu:                     "BU",
+        ownerEmail:             "Owner_Email",    // drives the user scoping
+
+        /* scorecard */
+        newProspects:           "New_Prospects",
+        csProspects:            "CS_Prospects",
+        newCustomers:           "New_Customers",
+        csCustomers:            "CS_Customers",
+        under5kCustomers:       "Under_5K_Customers",
+        over5kCustomers:        "Over_5K_Customers",
+        newRevenue:             "New_Revenue",
+        csRevenue:              "CS_Revenue",
+        leads:                  "Leads",
+
+        /* bookings + closures */
+        bookedCustomers:        "Booked_Customers",
+        churnedCustomers:       "Churned_Customers",
+        pseRate:                "PSE_Rate",
+        revenueRate:            "Revenue_Rate",
+        customerRate:           "Customer_Rate",
+
+        /* channel mix */
+        guidedCustomers:        "Guided_Customers",
+        selfServeCustomers:     "SelfService_Customers",
+        guidedRevenue:          "Guided_Revenue",
+        selfServeRevenue:       "SelfService_Revenue",
+
+        /* pipeline & loss — snapshots, read from the latest month */
+        qualifiedLostCustomers: "Qualified_Lost_Customers",
+        lostRevenue:            "Lost_Revenue",
+        pipelineRevenueQuarter: "Pipeline_Revenue_Quarter",
+        pipelineRevenueYear:    "Pipeline_Revenue_Year",
+        pipelineOverdue:        "Pipeline_Overdue",
+        forecastRevenue:        "Forecast_Revenue",
+        attainedRevenue:        "Attained_Revenue",
+
+        /* quotas — null these if you have no target columns */
+        targetRevenue:          "Target_Revenue",
+        targetCustomers:        "Target_Customers",
+        targetPseRate:          "Target_PSE_Rate"
+      }
+    },
 
     /* Drill-through: fetch the records behind a point. Falls back to sample
        rows whenever the CRM API is unavailable (e.g. opened standalone). */
@@ -90,6 +155,52 @@
   function cssVar(name) {
     return getComputedStyle(document.documentElement)
       .getPropertyValue(name).trim() || "#888";
+  }
+
+  /**
+   * Who is looking. Populated from the CRM session inside the widget, and
+   * left null when opened standalone. The Scope filter resolves against
+   * this, so "My records" means whoever is signed in — not a hardcoded id.
+   */
+  var CRM = { user: null, teamEmails: [] };
+
+  /** The signed-in CRM user. Resolves to null rather than throwing. */
+  function loadCurrentUser() {
+    if (!window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.CONFIG ||
+        !ZOHO.CRM.CONFIG.getCurrentUser) return Promise.resolve(null);
+
+    return ZOHO.CRM.CONFIG.getCurrentUser().then(function (r) {
+      var u = r && r.users && r.users[0];
+      if (!u) return null;
+      CRM.user = {
+        id: u.id,
+        name: u.full_name || u.name,
+        email: u.email,
+        role: u.role && u.role.name,
+        profile: u.profile && u.profile.name
+      };
+      return CRM.user;
+    }).catch(function () { return null; });
+  }
+
+  /**
+   * Everyone reporting to the signed-in user, for the "My team" scope.
+   * Their own address is included so a manager's own deals count toward the
+   * team total. One level deep — extend here if you need the full tree.
+   */
+  function loadTeam() {
+    if (!CRM.user || !window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.API ||
+        !ZOHO.CRM.API.getAllUsers) return Promise.resolve([]);
+
+    return ZOHO.CRM.API.getAllUsers({ Type: "ActiveUsers" }).then(function (r) {
+      var users = (r && r.users) || [];
+      CRM.teamEmails = users.filter(function (u) {
+        return u.Reporting_To && String(u.Reporting_To.id) === String(CRM.user.id);
+      }).map(function (u) { return u.email; });
+
+      if (CRM.user.email) CRM.teamEmails.push(CRM.user.email);
+      return CRM.teamEmails;
+    }).catch(function () { return []; });
   }
 
   /**
@@ -239,54 +350,347 @@
      }
   ------------------------------------------------------------------------ */
 
-  /* ---- 4.2 Zoho Analytics adapter -------------------------------------
+  /* ---- 4.2 Zoho Analytics adapter --------------------------------------
 
-     Wire this up to your Analytics workspace. The usual route from a CRM
-     widget is a CRM Connection to the Analytics API, invoked server-side so
-     the token never reaches the browser:
+     The widget never holds a credential. It calls a CRM Connection by name;
+     CRM stores and refreshes the Analytics token server-side and proxies the
+     request. Set one up in Setup > Developer Hub > Connections with the
+     scope ZohoAnalytics.data.read, then fill in CONFIG.analytics below.
 
-       var res = await ZOHO.CRM.CONNECTION.invoke("<connection_link_name>", {
-         url: "https://analyticsapi.zoho.com/restapi/v2/workspaces/"
-            + "<WORKSPACE_ID>/views/<VIEW_ID>/data",
-         method: "GET",
-         param_type: 1,
-         parameters: {
-           CONFIG: JSON.stringify({
-             criteria: buildCriteria(year, scope, region, bu),
-             responseFormat: "json"
-           })
-         },
-         headers: { "ZANALYTICS-ORGID": "<ORG_ID>" }
-       });
-       return mapAnalyticsRows(res.details.statusMessage.data, year);
+     THE VIEW CONTRACT
+     Point this at ONE Analytics view (a table or query table) that returns
+     one row per month per dimension combination:
 
-     Then map the returned columns onto the § 4.1 shape. Keep the mapping in
-     `mapAnalyticsRows` so the renderers never learn your column names.
+         Year | Month | Region | BU | Owner_Email | <measures...>
+
+     Month is 1-12. Everything the dashboard shows is derived from those
+     rows client-side: the monthly series is the rows in month order, the
+     quarterly series sums them 3 at a time, the YTD tiles sum them all, and
+     the prior-year comparison is the same query run for year - 1.
+
+     The pipeline measures are point-in-time rather than additive, so they
+     are read from the LATEST month in the result rather than summed.
+
+     Any measure you have no column for: leave its entry as null in
+     CONFIG.analytics.columns. That metric then renders blank rather than
+     wrong — a gap in a line, a dash in a tile.
   ---------------------------------------------------------------------- */
 
   /**
    * Criteria for the Analytics query. "all" means the dimension is not
    * constrained, so it contributes no clause at all rather than a clause
    * matching the literal string "all".
+   *
+   * Scope is resolved against the signed-in CRM user rather than a literal:
+   * "mine" filters to their own email, so what a person sees follows who
+   * they are logged in as.
    */
   function buildCriteria(year, scope, region, bu) {
-    var parts = ['"Year" = ' + year];
-    if (scope && scope !== "all")   parts.push('"Scope" = \'' + scope + '\'');
-    if (region && region !== "all") parts.push('"Region" = \'' + region + '\'');
-    if (bu && bu !== "all")         parts.push('"BU" = \'' + bu + '\'');
+    var col = CONFIG.analytics.columns;
+    var q = function (name, value) {
+      return '"' + name + '" = \'' + String(value).replace(/'/g, "\\'") + "'";
+    };
+
+    var parts = ['"' + col.year + '" = ' + Number(year)];
+
+    if (region && region !== "all" && col.region) parts.push(q(col.region, region));
+    if (bu && bu !== "all" && col.bu) parts.push(q(col.bu, bu));
+
+    if (scope === "mine" && col.ownerEmail && CRM.user && CRM.user.email) {
+      parts.push(q(col.ownerEmail, CRM.user.email));
+    } else if (scope === "team" && col.ownerEmail && CRM.teamEmails.length) {
+      parts.push("(" + CRM.teamEmails.map(function (e) {
+        return q(col.ownerEmail, e);
+      }).join(" or ") + ")");
+    }
+
     return parts.join(" and ");
   }
+
+  /** True once every required id is filled in. */
+  function analyticsConfigured() {
+    var a = CONFIG.analytics;
+    return !!(a.connectionName && a.orgId && a.workspaceId && a.viewId);
+  }
+
+  /**
+   * One Analytics call through the CRM Connection. Returns the raw row
+   * array. Analytics nests its payload differently depending on the
+   * connection response shape, so unwrap defensively rather than assuming
+   * one path and failing opaquely.
+   */
+  function invokeAnalytics(criteria) {
+    var a = CONFIG.analytics;
+
+    return ZOHO.CRM.CONNECTION.invoke(a.connectionName, {
+      url: "https://analyticsapi.zoho." + a.dc +
+           "/restapi/v2/workspaces/" + a.workspaceId +
+           "/views/" + a.viewId + "/data",
+      method: "GET",
+      param_type: 1,
+      parameters: {
+        CONFIG: JSON.stringify({
+          criteria: criteria,
+          responseFormat: "json"
+        })
+      },
+      headers: { "ZANALYTICS-ORGID": a.orgId }
+    }).then(function (res) {
+      var body = res && res.details && res.details.statusMessage;
+      if (typeof body === "string") {
+        try { body = JSON.parse(body); } catch (e) { /* leave as-is */ }
+      }
+      var rows = body && (
+        (body.data && body.data.rows) ||
+        body.data ||
+        (body.response && body.response.result && body.response.result.rows)
+      );
+      if (!rows) {
+        throw new Error("Unexpected Analytics response — check the view id " +
+                        "and that the connection has ZohoAnalytics.data.read");
+      }
+      return rows;
+    });
+  }
+
+  /**
+   * Analytics rows -> the § 4.1 shape.
+   *
+   * Rows may arrive in any order and may skip months entirely (a month with
+   * no activity simply has no row). Indexing by month rather than pushing in
+   * arrival order means a missing month stays null — a gap — instead of
+   * silently shifting every later month one slot to the left.
+   */
+  function mapAnalyticsRows(rows, year, prevRows) {
+    var col = CONFIG.analytics.columns;
+    var months = ytdMonths(year);
+    var n = months.length;
+
+    var num = function (v) {
+      if (v == null || v === "") return null;
+      var f = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+      return isFinite(f) ? f : null;
+    };
+
+    /** Bucket a row set into a 12-slot array per measure. */
+    function bucket(src) {
+      var by = {};
+      (src || []).forEach(function (r) {
+        var m = parseInt(r[col.month], 10);
+        if (!(m >= 1 && m <= 12)) return;
+        var slot = by[m - 1] || (by[m - 1] = {});
+        Object.keys(col).forEach(function (key) {
+          var name = col[key];
+          if (!name || r[name] === undefined) return;
+          var v = num(r[name]);
+          if (v == null) return;
+          /* several owners/regions can share a month — additive measures
+             accumulate, point-in-time ones take the latest value */
+          slot[key] = POINT_IN_TIME[key] ? v : (slot[key] || 0) + v;
+        });
+      });
+      return by;
+    }
+
+    var cur = bucket(rows);
+    var prv = bucket(prevRows);
+
+    /** Measure -> a month-indexed array over the YTD axis. */
+    function series(src, key) {
+      var out = [];
+      for (var i = 0; i < n; i++) {
+        out.push(src[i] && src[i][key] != null ? src[i][key] : null);
+      }
+      return out;
+    }
+
+    var sum = function (arr) {
+      var t = null;
+      arr.forEach(function (v) { if (v != null) t = (t || 0) + v; });
+      return t;
+    };
+
+    /** Latest non-null value — for the point-in-time pipeline measures. */
+    var latest = function (arr) {
+      for (var i = arr.length - 1; i >= 0; i--) if (arr[i] != null) return arr[i];
+      return null;
+    };
+
+    /** Months summed three at a time; a quarter with no data stays null. */
+    function quarterly(arr) {
+      var out = [];
+      for (var q = 0; q < 4; q++) {
+        var slice = arr.slice(q * 3, q * 3 + 3).filter(function (v) { return v != null; });
+        out.push(slice.length ? slice.reduce(function (a, b) { return a + b; }, 0) : null);
+      }
+      return out;
+    }
+
+    var M = {};
+    Object.keys(col).forEach(function (key) { M[key] = series(cur, key); });
+    var P = {};
+    Object.keys(col).forEach(function (key) { P[key] = series(prv, key); });
+
+    var newCustomers = sum(M.newCustomers);
+    var csCustomers  = sum(M.csCustomers);
+    var newRevenue   = sum(M.newRevenue);
+    var csRevenue    = sum(M.csRevenue);
+    var newProspects = sum(M.newProspects);
+    var csProspects  = sum(M.csProspects);
+
+    var totalCustomers = (newCustomers || 0) + (csCustomers || 0);
+    var totalProspects = (newProspects || 0) + (csProspects || 0);
+
+    /* revenue is the sum of its two parts; leads drive the conversion rate */
+    var monthlyRevenue = M.newRevenue.map(function (v, i) {
+      var c = M.csRevenue[i];
+      return v == null && c == null ? null : (v || 0) + (c || 0);
+    });
+    var monthlyCustomers = M.newCustomers.map(function (v, i) {
+      var c = M.csCustomers[i];
+      return v == null && c == null ? null : (v || 0) + (c || 0);
+    });
+
+    return {
+      year: year,
+      scope: state.scope,
+
+      ytd: {
+        newProspects:     newProspects,
+        csProspects:      csProspects,
+        newCustomers:     newCustomers,
+        csCustomers:      csCustomers,
+        totalCustomers:   totalCustomers,
+        convPct:          totalProspects ? (totalCustomers / totalProspects) * 100 : null,
+        under5kCustomers: sum(M.under5kCustomers),
+        over5kCustomers:  sum(M.over5kCustomers),
+        newRevenue:       newRevenue,
+        csRevenue:        csRevenue,
+        totalRevenue:     (newRevenue || 0) + (csRevenue || 0)
+      },
+
+      prev: {
+        newProspects:     sum(P.newProspects),
+        csProspects:      sum(P.csProspects),
+        newCustomers:     sum(P.newCustomers),
+        csCustomers:      sum(P.csCustomers),
+        totalCustomers:   (sum(P.newCustomers) || 0) + (sum(P.csCustomers) || 0),
+        convPct:          null,
+        under5kCustomers: sum(P.under5kCustomers),
+        over5kCustomers:  sum(P.over5kCustomers),
+        newRevenue:       sum(P.newRevenue),
+        csRevenue:        sum(P.csRevenue),
+        totalRevenue:     (sum(P.newRevenue) || 0) + (sum(P.csRevenue) || 0)
+      },
+
+      monthly: {
+        revenue:   monthlyRevenue,
+        customers: monthlyCustomers,
+        leads:     M.leads
+      },
+      quarterly: {
+        revenue:   quarterly(monthlyRevenue),
+        customers: quarterly(monthlyCustomers),
+        leads:     quarterly(M.leads)
+      },
+
+      lastYear: {
+        monthly: {
+          revenue: P.newRevenue.map(function (v, i) {
+            var c = P.csRevenue[i];
+            return v == null && c == null ? null : (v || 0) + (c || 0);
+          }),
+          customers: P.newCustomers.map(function (v, i) {
+            var c = P.csCustomers[i];
+            return v == null && c == null ? null : (v || 0) + (c || 0);
+          }),
+          leads: P.leads
+        },
+        bookings: { booked: P.bookedCustomers, churned: P.churnedCustomers },
+        pse: { pse: P.pseRate, revenue: P.revenueRate, customers: P.customerRate },
+        channel: {
+          guidedCustomers:    P.guidedCustomers,
+          selfServeCustomers: P.selfServeCustomers,
+          guidedRevenue:      P.guidedRevenue,
+          selfServeRevenue:   P.selfServeRevenue
+        }
+      },
+
+      targets: {
+        monthlyRevenue:   M.targetRevenue,
+        monthlyCustomers: M.targetCustomers,
+        quarterlyRevenue: quarterly(M.targetRevenue),
+        pseClosureRate:   latest(M.targetPseRate)
+      },
+
+      pipeline: {
+        qualifiedLostCustomers: sum(M.qualifiedLostCustomers),
+        lostRevenue:            sum(M.lostRevenue),
+        pipelineRevenueQuarter: latest(M.pipelineRevenueQuarter),
+        pipelineRevenueYear:    latest(M.pipelineRevenueYear),
+        pipelineOverdue:        latest(M.pipelineOverdue),
+        forecastRevenue:        latest(M.forecastRevenue),
+        attainedRevenue:        latest(M.attainedRevenue) != null
+                                  ? latest(M.attainedRevenue)
+                                  : (newRevenue || 0) + (csRevenue || 0)
+      },
+      prevPipeline: {
+        qualifiedLostCustomers: sum(P.qualifiedLostCustomers),
+        lostRevenue:            sum(P.lostRevenue)
+      },
+
+      bookings: { booked: M.bookedCustomers, churned: M.churnedCustomers },
+      pse: { pse: M.pseRate, revenue: M.revenueRate, customers: M.customerRate },
+      channel: {
+        guidedCustomers:    M.guidedCustomers,
+        selfServeCustomers: M.selfServeCustomers,
+        guidedRevenue:      M.guidedRevenue,
+        selfServeRevenue:   M.selfServeRevenue
+      }
+    };
+  }
+
+  /* Measures that are a snapshot, not a running total. Summing these across
+     months would be meaningless, so they take the latest month's value. */
+  var POINT_IN_TIME = {
+    pipelineRevenueQuarter: true,
+    pipelineRevenueYear:    true,
+    pipelineOverdue:        true,
+    forecastRevenue:        true,
+    attainedRevenue:        true,
+    targetRevenue:          true,
+    targetCustomers:        true,
+    targetPseRate:          true,
+    pseRate:                true,
+    revenueRate:            true,
+    customerRate:           true
+  };
 
   function fetchData(year, scope, region, bu) {
     if (CONFIG.useMockData) {
       return Promise.resolve(mockData(year, scope, region, bu));
     }
 
-    // TODO: replace with the ZOHO.CRM.CONNECTION.invoke call sketched above,
-    // passing buildCriteria(year, scope, region, bu) as the criteria.
-    return Promise.reject(new Error(
-      "Analytics is not wired yet — see script.js § 4.2"
-    ));
+    if (!window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.CONNECTION) {
+      return Promise.reject(new Error(
+        "Live data needs the CRM SDK — open this inside CRM, not standalone."
+      ));
+    }
+    if (!analyticsConfigured()) {
+      return Promise.reject(new Error(
+        "Analytics is not configured — fill in CONFIG.analytics in script.js § 1."
+      ));
+    }
+
+    /* prior year is fetched alongside so the deltas and the compare overlay
+       have real history; if it fails we still render the current year */
+    return Promise.all([
+      invokeAnalytics(buildCriteria(year, scope, region, bu)),
+      invokeAnalytics(buildCriteria(year - 1, scope, region, bu))
+        .catch(function () { return []; })
+    ]).then(function (both) {
+      return mapAnalyticsRows(both[0], year, both[1]);
+    });
   }
 
   /**
@@ -2677,6 +3081,9 @@
       var slice = [periodLabel(state.year)];
       if (state.region !== "all") slice.push(state.region);
       if (state.bu !== "all") slice.push(state.bu);
+      if (state.scope !== "all" && CRM.user) {
+        slice.push(state.scope === "team" ? CRM.user.name + "'s team" : CRM.user.name);
+      }
       document.getElementById("lp-period").textContent = slice.join("  ·  ");
       rerender();
 
@@ -2691,6 +3098,14 @@
       markStale(false);
       setStatus("Could not load data: " + (err && err.message ? err.message : err), "error");
     });
+  }
+
+  /** Re-label the header once we know who is signed in. */
+  function renderViewer() {
+    var el = document.getElementById("lp-period");
+    if (el && CRM.user && state.scope !== "all") {
+      el.textContent = el.textContent + "  ·  " + CRM.user.name;
+    }
   }
 
   function syncZoomChip() {
@@ -2836,6 +3251,18 @@
     whenSdkReady(function () {
       ZOHO.embeddedApp.on("PageLoad", function () {
         adoptOrgCurrency();
+
+        /* Who is signed in decides what "My records" and "My team" mean, so
+           resolve it and reload if a user-scoped filter is already active.
+           The dashboard has already painted by now — this refines it. */
+        loadCurrentUser().then(function (user) {
+          if (!user) return null;
+          renderViewer();
+          return loadTeam();
+        }).then(function () {
+          if (state.scope !== "all") load();
+        });
+
         resizeWidget();
       });
       try { ZOHO.embeddedApp.init(); } catch (e) { /* not inside CRM */ }
