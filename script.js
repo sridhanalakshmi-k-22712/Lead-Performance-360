@@ -92,6 +92,22 @@
       .getPropertyValue(name).trim() || "#888";
   }
 
+  /**
+   * A CRM widget always runs in an iframe, and its host component supplies
+   * its own padding and title bar. Flag that up front — before first paint —
+   * so the dashboard renders at the embedded density immediately rather than
+   * reflowing once the SDK reports in.
+   */
+  (function detectEmbedded() {
+    var framed;
+    try {
+      framed = window.self !== window.top;
+    } catch (e) {
+      framed = true;          // cross-origin check threw: definitely framed
+    }
+    if (framed) document.documentElement.classList.add("lp-embedded");
+  })();
+
   /* ======================================================================
      2. Time helpers
      ====================================================================== */

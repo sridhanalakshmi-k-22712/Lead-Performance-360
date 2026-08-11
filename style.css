@@ -104,6 +104,29 @@ body {
 
 .lp-root { padding: 22px; max-width: 1680px; margin: 0 auto; }
 
+/* ---------- 2b. Embedded as a CRM component ------------------------------
+   Set by script.js when the page is framed. The host component already
+   draws a padded card with a title bar, so we stop doubling up: tighter
+   padding, and the <h1> gives way to the period/slice line, which is the
+   part the component header does NOT already tell you.
+   To keep the in-widget title (e.g. if your component has no visible
+   header), delete the `display: none` rule below.
+------------------------------------------------------------------------- */
+
+.lp-embedded .lp-root { padding: 12px; }
+.lp-embedded .lp-topbar { margin-bottom: 14px; }
+.lp-embedded .lp-topbar h1 { display: none; }
+
+.lp-embedded .lp-topbar__sub {
+  margin-top: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--z-ink-2);
+}
+
+.lp-embedded .lp-main { gap: 16px; }
+.lp-embedded .lp-status { margin-bottom: 12px; }
+
 /* ---------- 3. Top bar --------------------------------------------------- */
 
 .lp-topbar {
