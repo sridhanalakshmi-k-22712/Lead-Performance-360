@@ -137,7 +137,10 @@
     <div class="lp-drill__body" id="lp-drill-body"></div>
   </aside>
 
-  <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js"></script>
-  <script src="script.js"></script>
+  <!-- async: the CRM SDK comes off a CDN and nothing in the first render
+       needs it, so it must never hold up parsing or paint. script.js waits
+       for it separately and wires CRM up whenever it arrives. -->
+  <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js" async></script>
+  <script src="script.js" defer></script>
 </body>
 </html>

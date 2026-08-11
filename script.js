@@ -2778,30 +2778,52 @@
     load();
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
-    if (!window.ZOHO || !ZOHO.embeddedApp) {
-      boot();                       // opened directly, outside CRM
-      return;
-    }
+  /**
+   * Adopt the org's currency symbol once CRM reports it. The dashboard has
+   * already painted by this point, so a difference costs one cheap re-render
+   * instead of holding up the whole first paint.
+   */
+  function adoptOrgCurrency() {
+    if (!window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.CONFIG ||
+        !ZOHO.CRM.CONFIG.getOrgInfo) return;
 
-    ZOHO.embeddedApp.on("PageLoad", function () {
-      /* pick up the org currency so tiles read in the right symbol */
-      if (ZOHO.CRM && ZOHO.CRM.CONFIG && ZOHO.CRM.CONFIG.getOrgInfo) {
-        ZOHO.CRM.CONFIG.getOrgInfo().then(function (org) {
-          var sym = org && org.__zoho_crm_org && org.__zoho_crm_org.currency_symbol;
-          if (sym) CONFIG.currency = sym;
-        }).catch(function () { /* keep the default */ })
-          .then(boot);
-      } else {
-        boot();
+    ZOHO.CRM.CONFIG.getOrgInfo().then(function (org) {
+      var sym = org && org.__zoho_crm_org && org.__zoho_crm_org.currency_symbol;
+      if (sym && sym !== CONFIG.currency) {
+        CONFIG.currency = sym;
+        rerender();
       }
+    }).catch(function () { /* keep the default */ });
+  }
+
+  /**
+   * The SDK is loaded async, so it may land after this file runs. Poll
+   * briefly for it rather than blocking on it, and give up quietly when it
+   * never arrives — which is the normal case outside CRM.
+   */
+  function whenSdkReady(cb) {
+    var tries = 0;
+    (function look() {
+      if (window.ZOHO && ZOHO.embeddedApp) return cb();
+      if (++tries > 50) return;            // ~5s, then stop looking
+      setTimeout(look, 100);
+    })();
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    /* Paint first, always. This used to wait for the CRM PageLoad event with
+       a 1.5s fallback behind it, so every load outside CRM — GitHub Pages, a
+       local file open — showed an empty shell for that full delay before
+       anything appeared. Nothing in the first render needs the SDK. */
+    boot();
+
+    whenSdkReady(function () {
+      ZOHO.embeddedApp.on("PageLoad", function () {
+        adoptOrgCurrency();
+        resizeWidget();
+      });
+      try { ZOHO.embeddedApp.init(); } catch (e) { /* not inside CRM */ }
     });
-
-    try { ZOHO.embeddedApp.init(); } catch (e) { boot(); }
-
-    /* PageLoad only fires inside CRM. Locally the SDK still loads from the
-       CDN, so without this the dashboard would sit blank forever. */
-    setTimeout(boot, 1500);
   });
 
 })();
