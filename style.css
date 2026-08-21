@@ -1,7 +1,8 @@
 /* ==========================================================================
    Lead Performance 360 — Zoho CRM widget
-   Apple-inspired surface language: #f5f5f7 plane, white cards on layered
-   grey + white shadows, generous radii, SF tracking. Light mode only.
+   Apple-inspired surface language: white plane, white cards separated by a
+   hairline border and layered grey + white shadows, generous radii, SF
+   tracking. Light mode only.
    The categorical series ramp is unchanged (CVD-validated — see script.js §1).
    ========================================================================== */
 
@@ -11,9 +12,12 @@
   color-scheme: only light;
 
   /* Surfaces & ink */
-  --z-page:        #f5f5f7;   /* Apple's signature plane grey */
+  --z-page:        #ffffff;   /* page plane */
   --z-surface:     #ffffff;
   --z-surface-alt: #fafafa;
+  /* Interior fills that used to borrow the grey page plane. Kept as its own
+     token so they stay visible now that the page itself is white. */
+  --z-fill:        #f5f5f7;
   --z-border:      rgba(0, 0, 0, .07);
   --z-hairline:    rgba(0, 0, 0, .05);
   --z-ink:         #1d1d1f;
@@ -764,7 +768,7 @@ body {
 .lp-drill__summary {
   padding: 12px 14px;
   border-radius: 12px;
-  background: var(--z-page);
+  background: var(--z-fill);
 }
 
 .lp-drill__stat {
@@ -810,7 +814,7 @@ body {
   transition: background .15s;
 }
 
-.lp-drill__row:hover { background: var(--z-page); }
+.lp-drill__row:hover { background: var(--z-fill); }
 .lp-drill__row:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--z-ring); }
 
 .lp-drill__row-name {
