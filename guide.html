@@ -1,0 +1,548 @@
+<title>Reading Lead Performance 360</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+  :root {
+    --ground:      #ffffff;
+    --tray:        #f5f5f7;
+    --tray-edge:   rgba(0,0,0,.07);
+    --ink:         #1d1d1f;
+    --ink-2:       #56565a;
+    --ink-3:       #86868b;
+    --accent:      #0071e3;
+    --accent-weak: #ebf4fe;
+    --rev:         #1f6fd0;
+    --cust:        #e8712a;
+    --lead:        #12a37f;
+    --good:        #007a33;
+    --bad:         #c9342c;
+
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #131417;
+      --tray:        #1c1e22;
+      --tray-edge:   rgba(255,255,255,.10);
+      --ink:         #f2f2f4;
+      --ink-2:       #b9bac0;
+      --ink-3:       #8b8d95;
+      --accent:      #4a9bf0;
+      --accent-weak: #17273a;
+      --rev:         #4a92e8;
+      --cust:        #e58a4c;
+      --lead:        #2bb894;
+      --good:        #3fb96a;
+      --bad:         #ef7b76;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #131417;
+    --tray:        #1c1e22;
+    --tray-edge:   rgba(255,255,255,.10);
+    --ink:         #f2f2f4;
+    --ink-2:       #b9bac0;
+    --ink-3:       #8b8d95;
+    --accent:      #4a9bf0;
+    --accent-weak: #17273a;
+    --rev:         #4a92e8;
+    --cust:        #e58a4c;
+    --lead:        #2bb894;
+    --good:        #3fb96a;
+    --bad:         #ef7b76;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 64px 24px 96px; }
+  .col  { max-width: 68ch; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 14px;
+  }
+
+  h1 {
+    font-family: var(--sans);
+    font-size: clamp(30px, 5vw, 44px);
+    font-weight: 600;
+    letter-spacing: -.02em;
+    line-height: 1.1;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+
+  .standfirst { font-size: 18px; color: var(--ink-2); margin: 0; text-wrap: balance; }
+
+  h2 {
+    font-family: var(--sans);
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -.014em;
+    text-wrap: balance;
+    margin: 0 0 8px;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -.008em;
+    margin: 0 0 6px;
+  }
+
+  section { margin-top: 60px; padding-top: 30px; border-top: 1px solid var(--tray-edge); }
+  section > .col > p { margin: 0 0 16px; }
+  p { margin: 0 0 16px; }
+
+  /* ---- lookup table: the "where do I look" answer ---- */
+  .scroller { overflow-x: auto; margin: 26px 0 0; }
+
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 15px; }
+
+  th, td { text-align: left; padding: 12px 14px; vertical-align: top; }
+
+  thead th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    border-bottom: 1px solid var(--tray-edge);
+    white-space: nowrap;
+  }
+
+  tbody tr + tr td { border-top: 1px solid var(--tray-edge); }
+  tbody td:first-child { color: var(--ink); width: 52%; }
+  tbody td:last-child { color: var(--ink-2); }
+
+  .where { font-family: var(--sans); font-weight: 600; color: var(--ink); }
+
+  /* ---- component cards ---- */
+  .cards { display: grid; gap: 18px; margin-top: 28px; }
+
+  .card {
+    background: var(--tray);
+    border: 1px solid var(--tray-edge);
+    border-radius: 16px;
+    padding: 22px 24px;
+  }
+
+  .card .eyebrow { margin-bottom: 8px; }
+  .card > p:last-child { margin-bottom: 0; }
+
+  .answers {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+
+  /* ---- metric definition list ---- */
+  dl { margin: 0; display: grid; gap: 11px; }
+
+  dl.split { grid-template-columns: minmax(140px, 210px) 1fr; gap: 11px 20px; }
+
+  dt {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  dd { margin: 0; font-size: 14.5px; color: var(--ink-2); }
+
+  @media (max-width: 620px) {
+    dl.split { grid-template-columns: 1fr; gap: 3px 0; }
+    dl.split dd { margin-bottom: 10px; }
+  }
+
+  /* series identity chips — same hues the dashboard uses */
+  .key { width: 11px; height: 3px; border-radius: 2px; flex: none; transform: translateY(-3px); }
+  .key.rev  { background: var(--rev); }
+  .key.cust { background: var(--cust); }
+  .key.lead { background: var(--lead); }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .04em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--accent-weak);
+    color: var(--accent);
+    white-space: nowrap;
+  }
+
+  .up   { color: var(--good); font-weight: 600; }
+  .down { color: var(--bad);  font-weight: 600; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .87em;
+    background: var(--tray);
+    border: 1px solid var(--tray-edge);
+    padding: 1px 5px;
+    border-radius: 5px;
+  }
+
+  .card code { background: var(--ground); }
+
+  ul { margin: 0 0 16px; padding-left: 20px; }
+  li { margin: 0 0 8px; }
+
+  /* ---- caution notes: the misreadings that actually happen ---- */
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-weak);
+    border-radius: 0 10px 10px 0;
+    padding: 14px 18px;
+    margin: 0 0 14px;
+    font-size: 15px;
+  }
+
+  .note strong { font-family: var(--sans); }
+  .note :last-child { margin-bottom: 0; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--tray-edge);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
+  a { color: var(--accent); }
+  a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+
+  <header class="col">
+    <p class="eyebrow">Zoho CRM · Home page widget</p>
+    <h1>Reading Lead Performance 360</h1>
+    <p class="standfirst">One screen covering where your business is coming from, how it is
+      trending, what is still open, and whether you keep what you win. This is a map of which
+      part answers which question.</p>
+  </header>
+
+  <section>
+    <div class="col">
+      <h2>Start here: where do I look?</h2>
+      <p>Five areas, top to bottom. Each answers a different kind of question, so it is worth
+        knowing which one to go to rather than reading the whole screen every time.</p>
+    </div>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th scope="col">What you want to know</th><th scope="col">Where to look</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>How much have we brought in so far this year?</td>
+            <td><span class="where">YTD scorecard</span> — the six tiles at the top</td>
+          </tr>
+          <tr>
+            <td>Is this new business, or growth in accounts we already have?</td>
+            <td><span class="where">YTD scorecard</span> — compare the New and Cross-Sell tiles</td>
+          </tr>
+          <tr>
+            <td>Are we dealing with small accounts or large ones?</td>
+            <td><span class="where">YTD scorecard</span> — the <code>&lt; 5K</code> / <code>&gt; 5K</code> sub-figures</td>
+          </tr>
+          <tr>
+            <td>Is revenue climbing or flattening month to month?</td>
+            <td><span class="where">Monthly performance</span> — the Revenue panel</td>
+          </tr>
+          <tr>
+            <td>How did each quarter actually land?</td>
+            <td><span class="where">Quarterly performance</span></td>
+          </tr>
+          <tr>
+            <td>Are enough leads coming in to sustain this?</td>
+            <td><span class="where">Monthly performance</span> — the Leads panel</td>
+          </tr>
+          <tr>
+            <td>What could still close this quarter?</td>
+            <td><span class="where">Pipeline Revenue</span> — the quarter tile</td>
+          </tr>
+          <tr>
+            <td>What has slipped past its close date and needs chasing?</td>
+            <td><span class="where">Pipeline Overdue</span></td>
+          </tr>
+          <tr>
+            <td>Are we going to make the number?</td>
+            <td><span class="where">Forecasted vs Attainment</span></td>
+          </tr>
+          <tr>
+            <td>What are we losing, and how much is it worth?</td>
+            <td><span class="where">Qualified Lost Customers</span> and <span class="where">Lost Revenue</span></td>
+          </tr>
+          <tr>
+            <td>Do we keep the customers we book?</td>
+            <td><span class="where">Churned vs booked customers</span></td>
+          </tr>
+          <tr>
+            <td>How much business needs a rep, and how much closes itself?</td>
+            <td><span class="where">Guided selling vs self service</span></td>
+          </tr>
+          <tr>
+            <td>Which actual deals or accounts make up this number?</td>
+            <td><span class="where">Click any point</span> on any chart</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="col">
+      <h2>The five areas</h2>
+      <p>Reading down the screen, each area narrows the question: from totals, to trend, to what
+        is still in play, to whether it sticks.</p>
+    </div>
+
+    <div class="cards">
+
+      <article class="card">
+        <p class="eyebrow">Area 1 · Top of screen</p>
+        <h3>YTD scorecard</h3>
+        <p class="answers">Answers: where has the year got to so far?</p>
+        <p>Six tiles covering January through the current month. Each shows one headline figure,
+          a smaller paired figure beneath it, and how it compares with the same period last
+          year.</p>
+        <dl class="split">
+          <dt>New Prospects</dt>
+          <dd>Fresh opportunities that are not existing customers. Paired with how many of your
+            customers sit under the 5K revenue band.</dd>
+
+          <dt>Cross-Sell Prospects</dt>
+          <dd>Opportunities to sell more into accounts you already have. <strong>CS</strong>
+            throughout the dashboard means cross-sell. Paired with customers above 5K.</dd>
+
+          <dt>New Customers</dt>
+          <dd>Accounts won for the first time, and the revenue they brought.</dd>
+
+          <dt>Cross-Sell Customers</dt>
+          <dd>Existing accounts that bought again, and the revenue from it.</dd>
+
+          <dt>Total Customers</dt>
+          <dd>New plus cross-sell, with total revenue beneath.</dd>
+
+          <dt>Conversion %</dt>
+          <dd>Share of prospects that became customers. The one tile with no paired figure.</dd>
+        </dl>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow">Area 2 · Trend</p>
+        <h3>Monthly and Quarterly performance</h3>
+        <p class="answers">Answers: which direction is this going?</p>
+        <p>Three measures tracked over time, each in its own panel with its own scale:</p>
+        <dl class="split">
+          <dt><span class="key rev"></span>Revenue</dt>
+          <dd>Closed revenue in the period.</dd>
+
+          <dt><span class="key cust"></span>Customers</dt>
+          <dd>How many accounts that revenue came from.</dd>
+
+          <dt><span class="key lead"></span>Leads</dt>
+          <dd>What entered the top of the funnel — the leading indicator for the other two.</dd>
+        </dl>
+        <p style="margin-top:16px">Monthly runs January to the current month and gains a new
+          month automatically as the year goes on. Quarterly shows all four quarters, so
+          quarters that have not started yet are intentionally empty.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow">Area 3 · Still open</p>
+        <h3>Pipeline and loss</h3>
+        <p class="answers">Answers: what is still in play, and what did we drop?</p>
+        <dl class="split">
+          <dt>Qualified Lost Customers</dt>
+          <dd>Genuine opportunities that were qualified and then lost — not unqualified noise.</dd>
+
+          <dt>Lost Revenue</dt>
+          <dd>What those losses were worth.</dd>
+
+          <dt>Pipeline Revenue <span class="pill">quarter</span></dt>
+          <dd>Open pipeline with a close date in the current quarter. Your near-term picture.</dd>
+
+          <dt>Pipeline Revenue <span class="pill">FY</span></dt>
+          <dd>Open pipeline across the whole financial year.</dd>
+
+          <dt>Pipeline Overdue</dt>
+          <dd>Open pipeline whose close date has already passed. This is the action list — deals
+            that need re-dating, re-qualifying, or closing out.</dd>
+
+          <dt>Forecasted vs Attainment</dt>
+          <dd>How far through the forecast you are, as a bar with the attained and forecast
+            figures beneath. The bar turns amber then red as the gap widens.</dd>
+        </dl>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow">Area 4 · Retention</p>
+        <h3>Churned vs booked, and monthly closures</h3>
+        <p class="answers">Answers: does the business we win actually stay?</p>
+        <p><strong>Churned vs booked customers</strong> puts what you signed against what you
+          lost, month by month. Booked climbing while churn stays flat is healthy growth; both
+          climbing together means you are replacing customers rather than adding them.</p>
+        <p><strong>Monthly PSE's / closures</strong> tracks closure rates as percentages, so
+          PSE's, revenue and customers sit comparably on one axis.</p>
+      </article>
+
+      <article class="card">
+        <p class="eyebrow">Area 5 · Channel</p>
+        <h3>Guided selling vs self service</h3>
+        <p class="answers">Answers: how much of this needed a person?</p>
+        <p>Two charts, one counting customers and one counting revenue, splitting each into
+          guided selling (a rep was involved) and self service (the customer closed
+          themselves). The colours stay consistent across both, so you can read the pair
+          together.</p>
+        <p>Revenue per channel is usually the more revealing of the two: a large self-service
+          share of customers but a small share of revenue tells you self service is winning the
+          small accounts.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="col">
+      <h2>Controls along the top</h2>
+      <p>Everything in the filter row applies to the whole screen at once, so the figures always
+        agree with each other.</p>
+
+      <dl class="split">
+        <dt>Year</dt>
+        <dd>Which year you are looking at. The current year runs to this month; past years show
+          in full.</dd>
+
+        <dt>Scope</dt>
+        <dd><strong>All records</strong>, <strong>My records</strong> (only yours), or
+          <strong>My team</strong> (yours plus everyone reporting to you). This follows who is
+          signed in, so the same dashboard shows each person their own numbers.</dd>
+
+        <dt>Region · BU</dt>
+        <dd>Narrow to one region or business unit. Whatever is active is named next to the date
+          in the header, so a filtered figure is never mistaken for the whole company.</dd>
+
+        <dt>vs Last year</dt>
+        <dd>Draws last year's actuals behind this year's, and adds a year-on-year percentage to
+          each panel heading.</dd>
+
+        <dt>Target</dt>
+        <dd>Draws the quota line and shades any shortfall, so you can see when you fell behind
+          rather than just by how much.</dd>
+
+        <dt>Trend</dt>
+        <dd>Fits a straight line through the visible range — useful when a bumpy series makes
+          the direction hard to judge. It re-fits when you zoom.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="col">
+      <h2>Things you can do to a chart</h2>
+      <dl class="split">
+        <dt>Hover</dt>
+        <dd>Shows every series at that month, the change from the previous month, and — when the
+          overlays are on — last year's figure and the gap to target.</dd>
+
+        <dt>Click a point</dt>
+        <dd>Opens the actual records behind it, so you can go from a number straight to the
+          deals. Click a record to open it in CRM.</dd>
+
+        <dt>Drag across</dt>
+        <dd>Zooms into a range of months, and <em>every</em> month chart follows so the whole
+          screen stays on the same window. A chip appears at the top to clear it.</dd>
+
+        <dt>Click a legend key</dt>
+        <dd>Hides that series so you can isolate the other one.</dd>
+
+        <dt>Bars · Lines · Area</dt>
+        <dd>Switches how the same data is drawn. Bars are easier for comparing individual
+          months; lines make direction clearer.</dd>
+
+        <dt>Table</dt>
+        <dd>Shows the exact figures behind the chart. Every number is reachable here without
+          hovering.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="col">
+      <h2>Five things people misread</h2>
+
+      <div class="note">
+        <p><strong>Green does not always mean up.</strong> The colour follows whether the change
+          is <em>good</em>, not which way the arrow points. On Churned Customers, Lost Revenue
+          and Pipeline Overdue, a fall shows <span class="down">▼ green</span> because falling
+          is what you want.</p>
+      </div>
+
+      <div class="note">
+        <p><strong>A gap is missing data, not zero.</strong> Where a month has no data the line
+          breaks and a tile reads <code>–</code>. It is deliberately not drawn as zero, because
+          zero is a real and very different result.</p>
+      </div>
+
+      <div class="note">
+        <p><strong>Revenue, Customers and Leads sit in separate panels on purpose.</strong> They
+          are measured in different units, so putting them on one axis would let the scale
+          decide which line looks bigger. Separate panels keep each one honest; the shared
+          crosshair still lets you compare a month across all three.</p>
+      </div>
+
+      <div class="note">
+        <p><strong>Pipeline figures are a snapshot, not a running total.</strong> Pipeline,
+          overdue and forecast show where things stand right now. They are not the sum of the
+          year's months, so do not expect them to add up like revenue does.</p>
+      </div>
+
+      <div class="note">
+        <p><strong>Stacked and 100% answer different questions.</strong> Stacked shows real
+          totals, so the column grows as business grows. 100% shows only the mix, so the column
+          is always full height — useful for spotting a shift in channel share, useless for
+          telling whether the business grew.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="col">
+    Lead Performance 360 · Zoho CRM home page widget · figures follow the signed-in user
+  </footer>
+
+</div>
