@@ -43,6 +43,8 @@
        picklist so the list cannot drift out of sync with the data. */
     regions: ["North America", "EMEA", "APAC", "India", "LATAM"],
     businessUnits: ["Enterprise", "Mid-Market", "SMB", "Public Sector"],
+    services: ["Implementation", "Support", "Consulting", "Training",
+               "Managed Services"],
 
     /* Set false once CONFIG.analytics below is filled in. */
     useMockData: true,
@@ -70,6 +72,7 @@
         month:                  "Month",          // 1-12
         region:                 "Region",
         bu:                     "BU",
+        service:                "Service",
         ownerEmail:             "Owner_Email",    // drives the user scoping
 
         /* scorecard */
@@ -385,7 +388,7 @@
    * "mine" filters to their own email, so what a person sees follows who
    * they are logged in as.
    */
-  function buildCriteria(year, scope, region, bu) {
+  function buildCriteria(year, scope, region, bu, service) {
     var col = CONFIG.analytics.columns;
     var q = function (name, value) {
       return '"' + name + '" = \'' + String(value).replace(/'/g, "\\'") + "'";
@@ -395,6 +398,7 @@
 
     if (region && region !== "all" && col.region) parts.push(q(col.region, region));
     if (bu && bu !== "all" && col.bu) parts.push(q(col.bu, bu));
+    if (service && service !== "all" && col.service) parts.push(q(col.service, service));
 
     if (scope === "mine" && col.ownerEmail && CRM.user && CRM.user.email) {
       parts.push(q(col.ownerEmail, CRM.user.email));
@@ -666,9 +670,9 @@
     customerRate:           true
   };
 
-  function fetchData(year, scope, region, bu) {
+  function fetchData(year, scope, region, bu, service) {
     if (CONFIG.useMockData) {
-      return Promise.resolve(mockData(year, scope, region, bu));
+      return Promise.resolve(mockData(year, scope, region, bu, service));
     }
 
     if (!window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.CONNECTION) {
@@ -685,8 +689,8 @@
     /* prior year is fetched alongside so the deltas and the compare overlay
        have real history; if it fails we still render the current year */
     return Promise.all([
-      invokeAnalytics(buildCriteria(year, scope, region, bu)),
-      invokeAnalytics(buildCriteria(year - 1, scope, region, bu))
+      invokeAnalytics(buildCriteria(year, scope, region, bu, service)),
+      invokeAnalytics(buildCriteria(year - 1, scope, region, bu, service))
         .catch(function () { return []; })
     ]).then(function (both) {
       return mapAnalyticsRows(both[0], year, both[1]);
@@ -735,14 +739,15 @@
     };
   }
 
-  function mockData(year, scope, region, bu) {
+  function mockData(year, scope, region, bu, service) {
     region = region || "all";
     bu = bu || "all";
+    service = service || "all";
 
     var months = ytdMonths(year);
     var n = months.length;
     var rnd = seeded(year * 977 + scope.length * 13 +
-                     region.length * 101 + bu.length * 37);
+                     region.length * 101 + bu.length * 37 + service.length * 59);
 
     var mult = scope === "mine" ? 0.24 : scope === "team" ? 0.62 : 1;
     /* each selected dimension carves the org down to a slice of itself */
@@ -751,6 +756,9 @@
     }
     if (bu !== "all") {
       mult *= [0.42, 0.3, 0.19, 0.09][CONFIG.businessUnits.indexOf(bu)] || 0.25;
+    }
+    if (service !== "all") {
+      mult *= [0.31, 0.24, 0.2, 0.15, 0.1][CONFIG.services.indexOf(service)] || 0.2;
     }
 
     function series(base, growth, jitter) {
@@ -3032,7 +3040,8 @@
     year: new Date().getFullYear(),
     scope: "all",
     region: "all",
-    bu: "all"
+    bu: "all",
+    service: "all"
   };
   var lastData = null;
 
@@ -3071,7 +3080,7 @@
   function load() {
     markStale(true);
 
-    return fetchData(state.year, state.scope, state.region, state.bu)
+    return fetchData(state.year, state.scope, state.region, state.bu, state.service)
       .then(function (d) {
       lastData = d;
       VIEW.range = null;          // a new slice invalidates the old zoom
@@ -3081,6 +3090,7 @@
       var slice = [periodLabel(state.year)];
       if (state.region !== "all") slice.push(state.region);
       if (state.bu !== "all") slice.push(state.bu);
+      if (state.service !== "all") slice.push(state.service);
       if (state.scope !== "all" && CRM.user) {
         slice.push(state.scope === "team" ? CRM.user.name + "'s team" : CRM.user.name);
       }
@@ -3148,8 +3158,9 @@
     /* Region and BU. Like every filter in this row they scope EVERYTHING
        below them, so a change refetches and every card re-renders against
        the same slice — the numbers can never disagree with each other. */
-    [["lp-region", "region", CONFIG.regions,       "All regions"],
-     ["lp-bu",     "bu",     CONFIG.businessUnits, "All BUs"]]
+    [["lp-region",  "region",  CONFIG.regions,       "All regions"],
+     ["lp-bu",      "bu",      CONFIG.businessUnits, "All BUs"],
+     ["lp-service", "service", CONFIG.services,      "All services"]]
       .forEach(function (cfg) {
         var sel = document.getElementById(cfg[0]);
         if (!sel) return;

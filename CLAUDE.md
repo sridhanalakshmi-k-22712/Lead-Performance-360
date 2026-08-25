@@ -137,5 +137,9 @@ never a clause matching the literal string `"all"`.
   globally in `style.css`. Any new flex/grid element that relies on `hidden` needs that rule.
 - `getComputedTextLength()` returns 0 on a detached SVG. Reserve a fixed gutter instead of
   measuring text before the SVG is in the document.
-- `CONFIG.regions` / `CONFIG.businessUnits` are placeholder dimension values awaiting the
-  customer's real ones.
+- `CONFIG.regions` / `CONFIG.businessUnits` / `CONFIG.services` are placeholder dimension
+  values awaiting the customer's real ones.
+- Adding a dimension filter touches nine places: the `CONFIG` value list, the
+  `analytics.columns` map, `buildCriteria`, `fetchData`, `mockData` (seed + multiplier),
+  `state`, the `load()` call, the header slice line, and the filter-wiring array in `§ 8`.
+  Grep an existing one (`service`) to find them all.
