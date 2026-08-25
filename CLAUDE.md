@@ -139,6 +139,20 @@ never a clause matching the literal string `"all"`.
   measuring text before the SVG is in the document.
 - `CONFIG.regions` / `CONFIG.businessUnits` / `CONFIG.services` are placeholder dimension
   values awaiting the customer's real ones.
+- **Multi-value filters are arrays, and EMPTY means unconstrained.** `region`, `bu`,
+  `service`, `buHead`, `manager`, `rep` are arrays on `state`; `[]` is "All". There is no
+  `"all"` sentinel any more — treating "no filter" and "every value ticked" as the same state
+  is what keeps `buildCriteria` from emitting a pointless full-set `OR`. `year` and `scope`
+  stay single-valued on purpose: the charts share one month axis, and the scope modes are
+  mutually exclusive.
+- Within a dimension the values OR together; across dimensions they AND. People filters
+  collapse to one owner set via `resolveOwnerEmails()` — union of the selected tier's
+  subtrees, de-duplicated because two managers can share a report.
+- `createPicklist()` is the multi-select control (button + checkbox popover, since a native
+  `<select multiple>` needs ctrl-click and has nowhere to put "All"). It returns a handle with
+  `setItems()`, which the people cascade uses to refill options without rebuilding, and which
+  prunes selections that no longer exist rather than filtering on an id the reader can neither
+  see nor clear.
 - **Filters travel as one object.** `state` *is* the filter set and is passed straight to
   `fetchData(f)` / `buildCriteria(f, yearOverride)` / `mockData(f)`. It used to be positional
   args, which hit five parameters and was collapsed; do not go back to adding parameters.

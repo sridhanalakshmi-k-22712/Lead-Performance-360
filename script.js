@@ -266,21 +266,38 @@
    * silently produce an empty set that looks like "no business".
    */
   function resolveOwnerEmails(f) {
-    if (f.rep && f.rep !== "all") return emailsUnder(f.rep);
-    if (f.manager && f.manager !== "all") return emailsUnder(f.manager);
-    if (f.buHead && f.buHead !== "all") return emailsUnder(f.buHead);
+    /* union, de-duplicated: two selected managers may share a report */
+    var union = function (ids) {
+      var out = [];
+      ids.forEach(function (id) {
+        emailsUnder(id).forEach(function (e) {
+          if (out.indexOf(e) === -1) out.push(e);
+        });
+      });
+      return out;
+    };
+
+    if ((f.rep || []).length) return union(f.rep);
+    if ((f.manager || []).length) return union(f.manager);
+    if ((f.buHead || []).length) return union(f.buHead);
     if (f.scope === "mine" && CRM.user && CRM.user.email) return [CRM.user.email];
     if (f.scope === "team" && CRM.teamEmails.length) return CRM.teamEmails.slice();
     return null;
   }
 
   /** The label for whichever person the selection has narrowed to. */
-  function selectedPersonName(f) {
-    var id = f.rep !== "all" ? f.rep
-           : f.manager !== "all" ? f.manager
-           : f.buHead !== "all" ? f.buHead : null;
-    var p = id && CRM.people.byId[id];
-    return p ? p.name : null;
+  function selectedPeopleLabel(f) {
+    var tier = (f.rep || []).length ? { ids: f.rep, noun: "reps" }
+             : (f.manager || []).length ? { ids: f.manager, noun: "managers" }
+             : (f.buHead || []).length ? { ids: f.buHead, noun: "BU heads" }
+             : null;
+    if (!tier) return null;
+
+    if (tier.ids.length === 1) {
+      var p = CRM.people.byId[tier.ids[0]];
+      return p ? p.name : null;
+    }
+    return tier.ids.length + " " + tier.noun;
   }
 
   /** The signed-in CRM user. Resolves to null rather than throwing. */
@@ -494,11 +511,15 @@
     var year = yearOverride != null ? yearOverride : f.year;
     var parts = ['"' + col.year + '" = ' + Number(year)];
 
-    /* flat dimensions */
+    /* Flat dimensions. Values within one dimension are alternatives (OR);
+       separate dimensions narrow each other (AND). */
     [["region", col.region], ["bu", col.bu], ["service", col.service]]
       .forEach(function (pair) {
-        var v = f[pair[0]];
-        if (v && v !== "all" && pair[1]) parts.push(q(pair[1], v));
+        var vals = f[pair[0]] || [];
+        if (!vals.length || !pair[1]) return;
+        parts.push("(" + vals.map(function (v) {
+          return q(pair[1], v);
+        }).join(" or ") + ")");
       });
 
     /* people, collapsed to a single owner set (see resolveOwnerEmails) */
@@ -843,26 +864,29 @@
   function mockData(f) {
     var year = f.year;
     var scope = f.scope || "all";
-    var region = f.region || "all";
-    var bu = f.bu || "all";
-    var service = f.service || "all";
+    var region = f.region || [];
+    var bu = f.bu || [];
+    var service = f.service || [];
 
     var months = ytdMonths(year);
     var n = months.length;
+    var seedOf = function (vals) { return vals.join("|").length; };
     var rnd = seeded(year * 977 + scope.length * 13 +
-                     region.length * 101 + bu.length * 37 + service.length * 59);
+                     seedOf(region) * 101 + seedOf(bu) * 37 + seedOf(service) * 59);
 
     var mult = scope === "mine" ? 0.24 : scope === "team" ? 0.62 : 1;
     /* each selected dimension carves the org down to a slice of itself */
-    if (region !== "all") {
-      mult *= [0.34, 0.27, 0.19, 0.14, 0.06][CONFIG.regions.indexOf(region)] || 0.2;
-    }
-    if (bu !== "all") {
-      mult *= [0.42, 0.3, 0.19, 0.09][CONFIG.businessUnits.indexOf(bu)] || 0.25;
-    }
-    if (service !== "all") {
-      mult *= [0.31, 0.24, 0.2, 0.15, 0.1][CONFIG.services.indexOf(service)] || 0.2;
-    }
+    /* each selected member contributes its share, so picking two regions
+       reads larger than one and never larger than all of them */
+    var share = function (vals, list, weights) {
+      if (!vals.length) return 1;
+      var t = 0;
+      vals.forEach(function (v) { t += weights[list.indexOf(v)] || 0.15; });
+      return Math.min(1, t);
+    };
+    mult *= share(region, CONFIG.regions, [0.34, 0.27, 0.19, 0.14, 0.06]);
+    mult *= share(bu, CONFIG.businessUnits, [0.42, 0.3, 0.19, 0.09]);
+    mult *= share(service, CONFIG.services, [0.31, 0.24, 0.2, 0.15, 0.1]);
     /* a people selection narrows in proportion to how much of the org it
        covers, so a rep reads smaller than their manager, who reads smaller
        than their BU head */
@@ -3150,12 +3174,16 @@
   var state = {
     year: new Date().getFullYear(),
     scope: "all",
-    region: "all",
-    bu: "all",
-    service: "all",
-    buHead: "all",
-    manager: "all",
-    rep: "all"
+    /* Multi-select filters are arrays. EMPTY means unconstrained ("All"),
+       so "no filter" and "every box ticked" are not two spellings of the
+       same thing. Year and scope stay single-valued: one month axis cannot
+       serve two years, and the scope modes are mutually exclusive. */
+    region: [],
+    bu: [],
+    service: [],
+    buHead: [],
+    manager: [],
+    rep: []
   };
   var lastData = null;
 
@@ -3202,12 +3230,16 @@
       /* name the active slice, so a filtered number is never mistaken for
          the whole org */
       var slice = [periodLabel(state.year)];
-      if (state.region !== "all") slice.push(state.region);
-      if (state.bu !== "all") slice.push(state.bu);
-      if (state.service !== "all") slice.push(state.service);
-      var person = selectedPersonName(state);
+      /* name the active slice; several values collapse to "EMEA +2" so the
+         header cannot grow unbounded */
+      [state.region, state.bu, state.service].forEach(function (vals) {
+        if (!vals.length) return;
+        slice.push(vals.length === 1 ? vals[0] : vals[0] + " +" + (vals.length - 1));
+      });
+
+      var person = selectedPeopleLabel(state);
       if (person) {
-        slice.push(state.rep !== "all" ? person : person + "'s team");
+        slice.push((state.rep || []).length === 1 ? person : person + "'s team");
       } else if (state.scope !== "all" && CRM.user) {
         slice.push(state.scope === "team" ? CRM.user.name + "'s team" : CRM.user.name);
       }
@@ -3251,6 +3283,172 @@
     try { ZOHO.CRM.UI.Resize({ height: h + "px", width: "100%" }); } catch (e) { /* noop */ }
   }
 
+  /**
+   * Multi-select picklist. Returns a handle with setItems(), so the cascading
+   * people filters can refill their options without being rebuilt.
+   *
+   * An EMPTY selection means "all" — it is the unconstrained state, not an
+   * error. That keeps "no filter" and "every box ticked" from being two
+   * different ways of saying the same thing.
+   */
+  function createPicklist(cfg) {
+    var mount = document.getElementById(cfg.id);
+    if (!mount) return null;
+
+    mount.className = "lp-pick";
+    mount.textContent = "";
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "lp-pick__btn";
+    btn.setAttribute("aria-expanded", "false");
+    btn.setAttribute("aria-haspopup", "true");
+
+    var text = document.createElement("span");
+    text.className = "lp-pick__text";
+
+    var caret = document.createElementNS(SVG_NS, "svg");
+    caret.setAttribute("class", "lp-pick__caret");
+    caret.setAttribute("viewBox", "0 0 10 10");
+    caret.setAttribute("aria-hidden", "true");
+    caret.appendChild(el("path", {
+      d: "M2 4l3 3 3-3", fill: "none", stroke: "currentColor",
+      "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round"
+    }));
+
+    btn.appendChild(text);
+    btn.appendChild(caret);
+
+    var menu = document.createElement("div");
+    menu.className = "lp-pick__menu";
+    menu.hidden = true;
+
+    mount.appendChild(btn);
+    mount.appendChild(menu);
+
+    var items = cfg.items || [];
+
+    function selected() { return state[cfg.key] || []; }
+
+    function summarise() {
+      var sel = selected();
+      var active = sel.length > 0;
+      btn.setAttribute("data-active", String(active));
+
+      if (!active) { text.textContent = cfg.allLabel; return; }
+
+      var first = items.filter(function (i) { return i.value === sel[0]; })[0];
+      var name = first ? first.label : sel[0];
+      text.textContent = sel.length === 1 ? name : name + "  +" + (sel.length - 1);
+      btn.title = sel.map(function (v) {
+        var m = items.filter(function (i) { return i.value === v; })[0];
+        return m ? m.label : v;
+      }).join(", ");
+    }
+
+    function render() {
+      menu.textContent = "";
+
+      var allRow = option(cfg.allLabel, selected().length === 0, function (on) {
+        if (on) commit([]);          // ticking All is how you clear a selection
+        else render();
+      });
+      menu.appendChild(allRow);
+      menu.appendChild(document.createElement("hr")).className = "lp-pick__sep";
+
+      if (!items.length) {
+        var none = document.createElement("div");
+        none.className = "lp-pick__empty";
+        none.textContent = cfg.emptyLabel || "Nothing to choose";
+        menu.appendChild(none);
+        return;
+      }
+
+      items.forEach(function (item) {
+        var on = selected().indexOf(item.value) !== -1;
+        menu.appendChild(option(item.label, on, function (checked) {
+          var next = selected().slice();
+          var at = next.indexOf(item.value);
+          if (checked && at === -1) next.push(item.value);
+          if (!checked && at !== -1) next.splice(at, 1);
+          commit(next);
+        }));
+      });
+    }
+
+    function option(label, checked, onToggle) {
+      var row = document.createElement("label");
+      row.className = "lp-pick__opt";
+
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = checked;
+      box.addEventListener("change", function () { onToggle(box.checked); });
+
+      var span = document.createElement("span");
+      span.textContent = label;          // untrusted -> textContent
+
+      row.appendChild(box);
+      row.appendChild(span);
+      return row;
+    }
+
+    function commit(next) {
+      state[cfg.key] = next;
+      summarise();
+      render();
+      if (cfg.onChange) cfg.onChange(next);
+    }
+
+    function open() {
+      closeAllPicklists();
+      menu.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+      render();
+    }
+
+    function close() {
+      menu.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+    }
+
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (menu.hidden) open(); else close();
+    });
+
+    mount.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && !menu.hidden) { close(); btn.focus(); }
+    });
+
+    var handle = {
+      close: close,
+      setItems: function (next) {
+        items = next || [];
+        /* drop selections that no longer exist rather than filtering on a
+           stale id the reader can no longer see or clear */
+        var pruned = selected().filter(function (v) {
+          return items.some(function (i) { return i.value === v; });
+        });
+        if (pruned.length !== selected().length) state[cfg.key] = pruned;
+        summarise();
+        if (!menu.hidden) render();
+      }
+    };
+
+    PICKLISTS.push(handle);
+    summarise();
+    return handle;
+  }
+
+  var PICKLISTS = [];
+
+  function closeAllPicklists() {
+    PICKLISTS.forEach(function (p) { p.close(); });
+  }
+
+  document.addEventListener("click", closeAllPicklists);
+
   function initFilters() {
     var yearSel = document.getElementById("lp-year");
     var thisYear = new Date().getFullYear();
@@ -3272,32 +3470,19 @@
       load();
     });
 
-    /* Region and BU. Like every filter in this row they scope EVERYTHING
-       below them, so a change refetches and every card re-renders against
-       the same slice — the numbers can never disagree with each other. */
+    /* Dimension picklists. Like every filter in this row they scope
+       EVERYTHING below them, so a change refetches and every card re-renders
+       against the same slice — the numbers can never disagree. */
     [["lp-region",  "region",  CONFIG.regions,       "All regions"],
      ["lp-bu",      "bu",      CONFIG.businessUnits, "All BUs"],
      ["lp-service", "service", CONFIG.services,      "All services"]]
       .forEach(function (cfg) {
-        var sel = document.getElementById(cfg[0]);
-        if (!sel) return;
-
-        var all = document.createElement("option");
-        all.value = "all";
-        all.textContent = cfg[3];
-        sel.appendChild(all);
-
-        (cfg[2] || []).forEach(function (name) {
-          var o = document.createElement("option");
-          o.value = name;
-          o.textContent = name;          // untrusted -> textContent
-          sel.appendChild(o);
-        });
-
-        sel.value = state[cfg[1]];
-        sel.addEventListener("change", function () {
-          state[cfg[1]] = sel.value;
-          load();
+        createPicklist({
+          id: cfg[0],
+          key: cfg[1],
+          allLabel: cfg[3],
+          items: (cfg[2] || []).map(function (n) { return { value: n, label: n }; }),
+          onChange: load
         });
       });
 
@@ -3316,18 +3501,22 @@
       });
 
     /* Choosing a higher tier invalidates the tiers below it, so clear them
-       rather than leaving a rep selected who no longer sits under the chosen
+       rather than leaving a rep selected who no longer sits under any chosen
        manager. */
-    [["lp-buhead", "buHead", ["manager", "rep"]],
-     ["lp-manager", "manager", ["rep"]],
-     ["lp-rep", "rep", []]].forEach(function (cfg) {
-      var sel = document.getElementById(cfg[0]);
-      if (!sel) return;
-      sel.addEventListener("change", function () {
-        state[cfg[1]] = sel.value;
-        cfg[2].forEach(function (k) { state[k] = "all"; });
-        populatePeopleSelects();
-        load();
+    [["lp-buhead",  "buHead",  "All BU heads", ["manager", "rep"]],
+     ["lp-manager", "manager", "All managers", ["rep"]],
+     ["lp-rep",     "rep",     "All reps",     []]].forEach(function (cfg) {
+      PEOPLE_PICKS[cfg[1]] = createPicklist({
+        id: cfg[0],
+        key: cfg[1],
+        allLabel: cfg[2],
+        items: [],
+        emptyLabel: "No one under this selection",
+        onChange: function () {
+          cfg[3].forEach(function (k) { state[k] = []; });
+          populatePeopleSelects();
+          load();
+        }
       });
     });
 
@@ -3420,53 +3609,46 @@
   }
 
   /**
-   * Fill the three people selects. Each tier is narrowed by the one above it,
-   * so the lists only ever offer people who actually sit under the current
-   * selection. A selection that no longer exists falls back to "all" rather
-   * than silently filtering on a stale id.
+   * Refill the three people picklists. Each tier is narrowed by the union of
+   * the subtrees selected above it, so the lists only ever offer people who
+   * actually sit under the current selection.
    */
+  var PEOPLE_PICKS = {};
+
   function populatePeopleSelects() {
     var P = CRM.people;
 
-    var underHead = state.buHead !== "all" ? subtreeIds(state.buHead) : null;
+    var unionSubtrees = function (ids) {
+      var out = [];
+      ids.forEach(function (id) {
+        subtreeIds(id).forEach(function (x) {
+          if (out.indexOf(x) === -1) out.push(x);
+        });
+      });
+      return out;
+    };
+
+    var allowedMgr = state.buHead.length ? unionSubtrees(state.buHead) : null;
     var managers = P.managers.filter(function (id) {
-      return !underHead || underHead.indexOf(id) !== -1;
+      return !allowedMgr || allowedMgr.indexOf(id) !== -1;
     });
 
-    var repRoot = state.manager !== "all" ? state.manager
-                : state.buHead !== "all" ? state.buHead : null;
-    var underMgr = repRoot ? subtreeIds(repRoot) : null;
+    var repRoots = state.manager.length ? state.manager
+                 : state.buHead.length ? state.buHead : null;
+    var allowedRep = repRoots ? unionSubtrees(repRoots) : null;
     var reps = P.reps.filter(function (id) {
-      return !underMgr || underMgr.indexOf(id) !== -1;
+      return !allowedRep || allowedRep.indexOf(id) !== -1;
     });
 
-    fillPeopleSelect("lp-buhead", "buHead", P.buHeads, "All BU heads");
-    fillPeopleSelect("lp-manager", "manager", managers, "All managers");
-    fillPeopleSelect("lp-rep", "rep", reps, "All reps");
-  }
+    var toItems = function (ids) {
+      return ids.map(function (id) {
+        return { value: id, label: (CRM.people.byId[id] || {}).name || id };
+      });
+    };
 
-  function fillPeopleSelect(elId, key, ids, allLabel) {
-    var sel = document.getElementById(elId);
-    if (!sel) return;
-
-    sel.textContent = "";
-    var all = document.createElement("option");
-    all.value = "all";
-    all.textContent = allLabel;
-    sel.appendChild(all);
-
-    ids.forEach(function (id) {
-      var p = CRM.people.byId[id];
-      if (!p) return;
-      var o = document.createElement("option");
-      o.value = id;
-      o.textContent = p.name;        // untrusted -> textContent
-      sel.appendChild(o);
-    });
-
-    if (state[key] !== "all" && ids.indexOf(state[key]) === -1) state[key] = "all";
-    sel.value = state[key];
-    sel.disabled = ids.length === 0;
+    if (PEOPLE_PICKS.buHead) PEOPLE_PICKS.buHead.setItems(toItems(P.buHeads));
+    if (PEOPLE_PICKS.manager) PEOPLE_PICKS.manager.setItems(toItems(managers));
+    if (PEOPLE_PICKS.rep) PEOPLE_PICKS.rep.setItems(toItems(reps));
   }
 
   var booted = false;

@@ -32,41 +32,42 @@
           </select>
         </label>
 
-        <!-- Options are populated in script.js § 8 from CONFIG.regions /
-             CONFIG.businessUnits / CONFIG.services — point those at your
-             own dimension members. -->
-        <label class="lp-field">
+        <!-- Multi-select picklists, built by createPicklist() in script.js.
+             Values come from CONFIG.regions / businessUnits / services —
+             point those at your own dimension members. An empty selection
+             means "All". -->
+        <div class="lp-field">
           <span class="lp-field__label">Region</span>
-          <select class="lp-select" id="lp-region"></select>
-        </label>
+          <div id="lp-region"></div>
+        </div>
 
-        <label class="lp-field">
+        <div class="lp-field">
           <span class="lp-field__label">BU</span>
-          <select class="lp-select" id="lp-bu"></select>
-        </label>
+          <div id="lp-bu"></div>
+        </div>
 
-        <label class="lp-field">
+        <div class="lp-field">
           <span class="lp-field__label">Service</span>
-          <select class="lp-select" id="lp-service"></select>
-        </label>
+          <div id="lp-service"></div>
+        </div>
 
         <!-- People, narrowing down the reporting tree. Each tier only offers
              names that sit under the tier above it. Populated in script.js
              § 8 from CRM users (or a synthetic org outside CRM). -->
-        <label class="lp-field">
+        <div class="lp-field">
           <span class="lp-field__label">BU Head</span>
-          <select class="lp-select" id="lp-buhead"></select>
-        </label>
+          <div id="lp-buhead"></div>
+        </div>
 
-        <label class="lp-field">
+        <div class="lp-field">
           <span class="lp-field__label">Manager</span>
-          <select class="lp-select" id="lp-manager"></select>
-        </label>
+          <div id="lp-manager"></div>
+        </div>
 
-        <label class="lp-field">
+        <div class="lp-field">
           <span class="lp-field__label">Rep</span>
-          <select class="lp-select" id="lp-rep"></select>
-        </label>
+          <div id="lp-rep"></div>
+        </div>
 
         <!-- Analysis overlays. These scope every chart below them. -->
         <div class="lp-field">
