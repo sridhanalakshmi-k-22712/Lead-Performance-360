@@ -46,6 +46,17 @@
     services: ["Implementation", "Support", "Consulting", "Training",
                "Managed Services"],
 
+    /* How to tell a BU head from a manager from a rep. Every org names its
+       roles differently, so list YOUR CRM role names here and they win. Leave
+       them empty and the tiers are derived from the reporting tree instead:
+       no direct reports is a rep, reports who are all individuals is a
+       manager, and at least one report who manages people is a BU head. */
+    hierarchy: {
+      buHeadRoles:  [],
+      managerRoles: [],
+      repRoles:     []
+    },
+
     /* Set false once CONFIG.analytics below is filled in. */
     useMockData: true,
 
@@ -165,7 +176,112 @@
    * left null when opened standalone. The Scope filter resolves against
    * this, so "My records" means whoever is signed in — not a hardcoded id.
    */
-  var CRM = { user: null, teamEmails: [] };
+  var CRM = {
+    user: null,
+    teamEmails: [],
+    /* The reporting tree behind the BU Head / Manager / Rep filters. Built
+       from CRM users inside the widget, synthesised outside it. */
+    people: { byId: {}, children: {}, buHeads: [], managers: [], reps: [] }
+  };
+
+  /**
+   * Index the reporting tree and sort everyone into a tier. Role names from
+   * CONFIG.hierarchy win when supplied; otherwise the tiers come from the
+   * shape of the tree, which is the only thing we can rely on in an org whose
+   * role names we do not know.
+   */
+  function buildHierarchy(users) {
+    var P = CRM.people;
+    P.byId = {}; P.children = {}; P.buHeads = []; P.managers = []; P.reps = [];
+
+    users.forEach(function (u) { P.byId[u.id] = u; });
+    Object.keys(P.byId).forEach(function (id) {
+      var m = P.byId[id].managerId;
+      if (m && P.byId[m]) (P.children[m] || (P.children[m] = [])).push(id);
+    });
+
+    var H = CONFIG.hierarchy || {};
+    var configured = (H.buHeadRoles || []).length || (H.managerRoles || []).length ||
+                     (H.repRoles || []).length;
+    var hasRole = function (list, role) {
+      return (list || []).some(function (r) {
+        return role && r.toLowerCase() === String(role).toLowerCase();
+      });
+    };
+
+    Object.keys(P.byId).forEach(function (id) {
+      var p = P.byId[id];
+
+      if (configured) {
+        if (hasRole(H.buHeadRoles, p.role)) P.buHeads.push(id);
+        else if (hasRole(H.managerRoles, p.role)) P.managers.push(id);
+        else if (hasRole(H.repRoles, p.role)) P.reps.push(id);
+        return;
+      }
+
+      var reports = P.children[id] || [];
+      if (!reports.length) { P.reps.push(id); return; }
+
+      /* A front-line manager's reports are all individuals; a BU head has at
+         least one report who manages people of their own. Keying off "manages
+         managers" rather than "sits at the top of the tree" keeps front-line
+         managers out of the BU-head list even when they report straight to
+         the top. */
+      var managesManagers = reports.some(function (r) {
+        return (P.children[r] || []).length > 0;
+      });
+      if (managesManagers) P.buHeads.push(id);
+      else P.managers.push(id);
+    });
+
+    var byName = function (a, b) {
+      return (P.byId[a].name || "").localeCompare(P.byId[b].name || "");
+    };
+    P.buHeads.sort(byName); P.managers.sort(byName); P.reps.sort(byName);
+  }
+
+  /** Everyone at or beneath one person. */
+  function subtreeIds(id) {
+    var out = [], stack = [id];
+    while (stack.length) {
+      var cur = stack.pop();
+      out.push(cur);
+      (CRM.people.children[cur] || []).forEach(function (c) { stack.push(c); });
+    }
+    return out;
+  }
+
+  function emailsUnder(id) {
+    return subtreeIds(id).map(function (i) {
+      return CRM.people.byId[i] && CRM.people.byId[i].email;
+    }).filter(Boolean);
+  }
+
+  /**
+   * Which record owners the current selection implies, or null for "no
+   * owner constraint at all".
+   *
+   * The most specific person wins — rep, then manager, then BU head, then the
+   * Scope filter. Intersecting them instead would let two people-filters
+   * silently produce an empty set that looks like "no business".
+   */
+  function resolveOwnerEmails(f) {
+    if (f.rep && f.rep !== "all") return emailsUnder(f.rep);
+    if (f.manager && f.manager !== "all") return emailsUnder(f.manager);
+    if (f.buHead && f.buHead !== "all") return emailsUnder(f.buHead);
+    if (f.scope === "mine" && CRM.user && CRM.user.email) return [CRM.user.email];
+    if (f.scope === "team" && CRM.teamEmails.length) return CRM.teamEmails.slice();
+    return null;
+  }
+
+  /** The label for whichever person the selection has narrowed to. */
+  function selectedPersonName(f) {
+    var id = f.rep !== "all" ? f.rep
+           : f.manager !== "all" ? f.manager
+           : f.buHead !== "all" ? f.buHead : null;
+    var p = id && CRM.people.byId[id];
+    return p ? p.name : null;
+  }
 
   /** The signed-in CRM user. Resolves to null rather than throwing. */
   function loadCurrentUser() {
@@ -186,25 +302,6 @@
     }).catch(function () { return null; });
   }
 
-  /**
-   * Everyone reporting to the signed-in user, for the "My team" scope.
-   * Their own address is included so a manager's own deals count toward the
-   * team total. One level deep — extend here if you need the full tree.
-   */
-  function loadTeam() {
-    if (!CRM.user || !window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.API ||
-        !ZOHO.CRM.API.getAllUsers) return Promise.resolve([]);
-
-    return ZOHO.CRM.API.getAllUsers({ Type: "ActiveUsers" }).then(function (r) {
-      var users = (r && r.users) || [];
-      CRM.teamEmails = users.filter(function (u) {
-        return u.Reporting_To && String(u.Reporting_To.id) === String(CRM.user.id);
-      }).map(function (u) { return u.email; });
-
-      if (CRM.user.email) CRM.teamEmails.push(CRM.user.email);
-      return CRM.teamEmails;
-    }).catch(function () { return []; });
-  }
 
   /**
    * A CRM widget always runs in an iframe, and its host component supplies
@@ -388,22 +485,26 @@
    * "mine" filters to their own email, so what a person sees follows who
    * they are logged in as.
    */
-  function buildCriteria(year, scope, region, bu, service) {
+  function buildCriteria(f, yearOverride) {
     var col = CONFIG.analytics.columns;
     var q = function (name, value) {
       return '"' + name + '" = \'' + String(value).replace(/'/g, "\\'") + "'";
     };
 
+    var year = yearOverride != null ? yearOverride : f.year;
     var parts = ['"' + col.year + '" = ' + Number(year)];
 
-    if (region && region !== "all" && col.region) parts.push(q(col.region, region));
-    if (bu && bu !== "all" && col.bu) parts.push(q(col.bu, bu));
-    if (service && service !== "all" && col.service) parts.push(q(col.service, service));
+    /* flat dimensions */
+    [["region", col.region], ["bu", col.bu], ["service", col.service]]
+      .forEach(function (pair) {
+        var v = f[pair[0]];
+        if (v && v !== "all" && pair[1]) parts.push(q(pair[1], v));
+      });
 
-    if (scope === "mine" && col.ownerEmail && CRM.user && CRM.user.email) {
-      parts.push(q(col.ownerEmail, CRM.user.email));
-    } else if (scope === "team" && col.ownerEmail && CRM.teamEmails.length) {
-      parts.push("(" + CRM.teamEmails.map(function (e) {
+    /* people, collapsed to a single owner set (see resolveOwnerEmails) */
+    var owners = resolveOwnerEmails(f);
+    if (owners && owners.length && col.ownerEmail) {
+      parts.push("(" + owners.map(function (e) {
         return q(col.ownerEmail, e);
       }).join(" or ") + ")");
     }
@@ -670,9 +771,9 @@
     customerRate:           true
   };
 
-  function fetchData(year, scope, region, bu, service) {
+  function fetchData(f) {
     if (CONFIG.useMockData) {
-      return Promise.resolve(mockData(year, scope, region, bu, service));
+      return Promise.resolve(mockData(f));
     }
 
     if (!window.ZOHO || !ZOHO.CRM || !ZOHO.CRM.CONNECTION) {
@@ -689,11 +790,11 @@
     /* prior year is fetched alongside so the deltas and the compare overlay
        have real history; if it fails we still render the current year */
     return Promise.all([
-      invokeAnalytics(buildCriteria(year, scope, region, bu, service)),
-      invokeAnalytics(buildCriteria(year - 1, scope, region, bu, service))
+      invokeAnalytics(buildCriteria(f)),
+      invokeAnalytics(buildCriteria(f, f.year - 1))
         .catch(function () { return []; })
     ]).then(function (both) {
-      return mapAnalyticsRows(both[0], year, both[1]);
+      return mapAnalyticsRows(both[0], f.year, both[1]);
     });
   }
 
@@ -739,10 +840,12 @@
     };
   }
 
-  function mockData(year, scope, region, bu, service) {
-    region = region || "all";
-    bu = bu || "all";
-    service = service || "all";
+  function mockData(f) {
+    var year = f.year;
+    var scope = f.scope || "all";
+    var region = f.region || "all";
+    var bu = f.bu || "all";
+    var service = f.service || "all";
 
     var months = ytdMonths(year);
     var n = months.length;
@@ -759,6 +862,14 @@
     }
     if (service !== "all") {
       mult *= [0.31, 0.24, 0.2, 0.15, 0.1][CONFIG.services.indexOf(service)] || 0.2;
+    }
+    /* a people selection narrows in proportion to how much of the org it
+       covers, so a rep reads smaller than their manager, who reads smaller
+       than their BU head */
+    var owners = resolveOwnerEmails(f);
+    if (owners) {
+      var total = Object.keys(CRM.people.byId).length || owners.length;
+      mult *= Math.max(0.04, owners.length / total);
     }
 
     function series(base, growth, jitter) {
@@ -3041,7 +3152,10 @@
     scope: "all",
     region: "all",
     bu: "all",
-    service: "all"
+    service: "all",
+    buHead: "all",
+    manager: "all",
+    rep: "all"
   };
   var lastData = null;
 
@@ -3080,7 +3194,7 @@
   function load() {
     markStale(true);
 
-    return fetchData(state.year, state.scope, state.region, state.bu, state.service)
+    return fetchData(state)
       .then(function (d) {
       lastData = d;
       VIEW.range = null;          // a new slice invalidates the old zoom
@@ -3091,7 +3205,10 @@
       if (state.region !== "all") slice.push(state.region);
       if (state.bu !== "all") slice.push(state.bu);
       if (state.service !== "all") slice.push(state.service);
-      if (state.scope !== "all" && CRM.user) {
+      var person = selectedPersonName(state);
+      if (person) {
+        slice.push(state.rep !== "all" ? person : person + "'s team");
+      } else if (state.scope !== "all" && CRM.user) {
         slice.push(state.scope === "team" ? CRM.user.name + "'s team" : CRM.user.name);
       }
       document.getElementById("lp-period").textContent = slice.join("  ·  ");
@@ -3198,6 +3315,22 @@
         });
       });
 
+    /* Choosing a higher tier invalidates the tiers below it, so clear them
+       rather than leaving a rep selected who no longer sits under the chosen
+       manager. */
+    [["lp-buhead", "buHead", ["manager", "rep"]],
+     ["lp-manager", "manager", ["rep"]],
+     ["lp-rep", "rep", []]].forEach(function (cfg) {
+      var sel = document.getElementById(cfg[0]);
+      if (!sel) return;
+      sel.addEventListener("change", function () {
+        state[cfg[1]] = sel.value;
+        cfg[2].forEach(function (k) { state[k] = "all"; });
+        populatePeopleSelects();
+        load();
+      });
+    });
+
     document.getElementById("lp-zoom-reset").addEventListener("click", function () {
       VIEW.range = null;
       rerender();
@@ -3211,6 +3344,131 @@
     });
   }
 
+  /**
+   * A small synthetic org so the people filters work when there is no CRM
+   * session — opened standalone, or on GitHub Pages. Two BU heads, two
+   * managers each, three reps each.
+   */
+  function mockPeople() {
+    var org = [
+      ["Anita Rao",      ["Priya Menon",   ["Karan Shah", "Leena Iyer", "Omar Faruk"],
+                          "Daniel Whitby", ["Ravi Kulkarni", "Sara Lindqvist", "Tom Alvarez"]]],
+      ["David Osei",     ["Grace Nkemdi",  ["Hema Prasad", "Ian Brodie", "Jules Marchand"],
+                          "Nadia Haddad",  ["Peter Novak", "Rosa Ibarra", "Yusuf Demir"]]]
+    ];
+    var users = [];
+    var email = function (n) {
+      return n.toLowerCase().replace(/[^a-z]+/g, ".") + "@example.com";
+    };
+
+    org.forEach(function (head, hi) {
+      var headId = "h" + hi;
+      users.push({ id: headId, name: head[0], email: email(head[0]),
+                   role: "BU Head", managerId: null });
+
+      for (var i = 0; i < head[1].length; i += 2) {
+        var mName = head[1][i], reps = head[1][i + 1];
+        var mId = headId + "m" + i;
+        users.push({ id: mId, name: mName, email: email(mName),
+                     role: "Sales Manager", managerId: headId });
+        reps.forEach(function (rName, ri) {
+          users.push({ id: mId + "r" + ri, name: rName, email: email(rName),
+                       role: "Sales Rep", managerId: mId });
+        });
+      }
+    });
+    return users;
+  }
+
+  /** Direct reports of the signed-in user, plus themselves. */
+  function computeTeam() {
+    CRM.teamEmails = [];
+    if (!CRM.user) return;
+    var me = CRM.people.byId[String(CRM.user.id)];
+    if (me) CRM.teamEmails = emailsUnder(me.id);
+    if (CRM.user.email && CRM.teamEmails.indexOf(CRM.user.email) === -1) {
+      CRM.teamEmails.push(CRM.user.email);
+    }
+  }
+
+  /**
+   * Populate the reporting tree. Falls back to the synthetic org whenever CRM
+   * users are unavailable, so the filters are never dead controls.
+   */
+  function ensurePeople() {
+    if (window.ZOHO && ZOHO.CRM && ZOHO.CRM.API && ZOHO.CRM.API.getAllUsers) {
+      return ZOHO.CRM.API.getAllUsers({ Type: "ActiveUsers" }).then(function (r) {
+        var users = ((r && r.users) || []).map(function (u) {
+          return {
+            id: String(u.id),
+            name: u.full_name || u.name,
+            email: u.email,
+            role: u.role && u.role.name,
+            managerId: u.Reporting_To ? String(u.Reporting_To.id) : null
+          };
+        }).filter(function (u) { return u.email; });
+
+        buildHierarchy(users.length ? users : mockPeople());
+        return CRM.people;
+      }).catch(function () {
+        buildHierarchy(mockPeople());
+        return CRM.people;
+      });
+    }
+    buildHierarchy(mockPeople());
+    return Promise.resolve(CRM.people);
+  }
+
+  /**
+   * Fill the three people selects. Each tier is narrowed by the one above it,
+   * so the lists only ever offer people who actually sit under the current
+   * selection. A selection that no longer exists falls back to "all" rather
+   * than silently filtering on a stale id.
+   */
+  function populatePeopleSelects() {
+    var P = CRM.people;
+
+    var underHead = state.buHead !== "all" ? subtreeIds(state.buHead) : null;
+    var managers = P.managers.filter(function (id) {
+      return !underHead || underHead.indexOf(id) !== -1;
+    });
+
+    var repRoot = state.manager !== "all" ? state.manager
+                : state.buHead !== "all" ? state.buHead : null;
+    var underMgr = repRoot ? subtreeIds(repRoot) : null;
+    var reps = P.reps.filter(function (id) {
+      return !underMgr || underMgr.indexOf(id) !== -1;
+    });
+
+    fillPeopleSelect("lp-buhead", "buHead", P.buHeads, "All BU heads");
+    fillPeopleSelect("lp-manager", "manager", managers, "All managers");
+    fillPeopleSelect("lp-rep", "rep", reps, "All reps");
+  }
+
+  function fillPeopleSelect(elId, key, ids, allLabel) {
+    var sel = document.getElementById(elId);
+    if (!sel) return;
+
+    sel.textContent = "";
+    var all = document.createElement("option");
+    all.value = "all";
+    all.textContent = allLabel;
+    sel.appendChild(all);
+
+    ids.forEach(function (id) {
+      var p = CRM.people.byId[id];
+      if (!p) return;
+      var o = document.createElement("option");
+      o.value = id;
+      o.textContent = p.name;        // untrusted -> textContent
+      sel.appendChild(o);
+    });
+
+    if (state[key] !== "all" && ids.indexOf(state[key]) === -1) state[key] = "all";
+    sel.value = state[key];
+    sel.disabled = ids.length === 0;
+  }
+
   var booted = false;
 
   function boot() {
@@ -3218,6 +3476,10 @@
     booted = true;
     initFilters();
     load();
+
+    /* the people lists need the reporting tree, but the dashboard must not
+       wait on it — outside CRM this resolves synchronously anyway */
+    ensurePeople().then(populatePeopleSelects);
   }
 
   /**
@@ -3267,10 +3529,12 @@
            resolve it and reload if a user-scoped filter is already active.
            The dashboard has already painted by now — this refines it. */
         loadCurrentUser().then(function (user) {
-          if (!user) return null;
-          renderViewer();
-          return loadTeam();
+          if (user) renderViewer();
+          return ensurePeople();
         }).then(function () {
+          computeTeam();
+          populatePeopleSelects();
+          /* only refetch if a people-scoped filter is actually in play */
           if (state.scope !== "all") load();
         });
 

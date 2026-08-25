@@ -139,7 +139,20 @@ never a clause matching the literal string `"all"`.
   measuring text before the SVG is in the document.
 - `CONFIG.regions` / `CONFIG.businessUnits` / `CONFIG.services` are placeholder dimension
   values awaiting the customer's real ones.
-- Adding a dimension filter touches nine places: the `CONFIG` value list, the
-  `analytics.columns` map, `buildCriteria`, `fetchData`, `mockData` (seed + multiplier),
-  `state`, the `load()` call, the header slice line, and the filter-wiring array in `§ 8`.
-  Grep an existing one (`service`) to find them all.
+- **Filters travel as one object.** `state` *is* the filter set and is passed straight to
+  `fetchData(f)` / `buildCriteria(f, yearOverride)` / `mockData(f)`. It used to be positional
+  args, which hit five parameters and was collapsed; do not go back to adding parameters.
+  Adding a flat dimension now means: the `CONFIG` value list, the `analytics.columns` entry,
+  one row in `buildCriteria`'s pair list, a `mockData` multiplier, a `state` key, the
+  filter-wiring array in `§ 8`, and the header slice line. Grep `service` for the set.
+- **The people filters are a tree, not a list.** `buildHierarchy()` indexes CRM users by
+  `Reporting_To` and sorts them into BU heads / managers / reps. Tiers come from
+  `CONFIG.hierarchy` role names when set; otherwise they are derived — no reports is a rep,
+  all-individual reports is a manager, at least one report who manages people is a BU head.
+  That last rule is deliberate: keying off "sits at the top of the tree" instead misclassified
+  every front-line manager as a BU head.
+- **`resolveOwnerEmails()` collapses all people filters to one owner set, most-specific-wins**
+  (rep > manager > BU head > Scope). Intersecting them instead can yield an empty result that
+  reads as "no business" rather than "contradictory filters".
+- Outside CRM there are no users, so `mockPeople()` synthesises an org (2 heads, 4 managers,
+  12 reps) and the people filters stay live rather than becoming dead controls.

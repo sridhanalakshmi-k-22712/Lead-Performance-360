@@ -50,6 +50,24 @@
           <select class="lp-select" id="lp-service"></select>
         </label>
 
+        <!-- People, narrowing down the reporting tree. Each tier only offers
+             names that sit under the tier above it. Populated in script.js
+             § 8 from CRM users (or a synthetic org outside CRM). -->
+        <label class="lp-field">
+          <span class="lp-field__label">BU Head</span>
+          <select class="lp-select" id="lp-buhead"></select>
+        </label>
+
+        <label class="lp-field">
+          <span class="lp-field__label">Manager</span>
+          <select class="lp-select" id="lp-manager"></select>
+        </label>
+
+        <label class="lp-field">
+          <span class="lp-field__label">Rep</span>
+          <select class="lp-select" id="lp-rep"></select>
+        </label>
+
         <!-- Analysis overlays. These scope every chart below them. -->
         <div class="lp-field">
           <span class="lp-field__label">Analysis</span>
