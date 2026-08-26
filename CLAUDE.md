@@ -148,11 +148,20 @@ never a clause matching the literal string `"all"`.
 - Within a dimension the values OR together; across dimensions they AND. People filters
   collapse to one owner set via `resolveOwnerEmails()` — union of the selected tier's
   subtrees, de-duplicated because two managers can share a report.
-- `createPicklist()` is the multi-select control (button + checkbox popover, since a native
-  `<select multiple>` needs ctrl-click and has nowhere to put "All"). It returns a handle with
-  `setItems()`, which the people cascade uses to refill options without rebuilding, and which
-  prunes selections that no longer exist rather than filtering on an id the reader can neither
-  see nor clear.
+- `createPicklist()` is the multi-select control (button + popover with search, Select all /
+  Deselect all, and drawn checkboxes over visually-hidden real ones so keyboard and screen
+  readers still work). A native `<select multiple>` needs ctrl-click and has nowhere to put
+  bulk actions. The handle exposes `setItems()` — used by the people cascade to refill options
+  without rebuilding, pruning selections that no longer exist rather than filtering on an id
+  the reader can neither see nor clear — and `sync()`, used by the master reset to re-label.
+- **The popover must stop click propagation.** A document-level listener closes every
+  picklist, so without `menu.addEventListener("click", stopPropagation)` ticking a box closes
+  the menu, which defeats multi-select. Dispatching `change` directly in a test does not catch
+  this — only a real `.click()` does.
+- `resetAll()` clears every filter, overlay and the zoom, but deliberately leaves
+  `CHART_TYPE` alone: a chosen chart form is a display preference, not a filter hiding data.
+  `syncResetState()` keeps the button disabled while `anythingActive()` is false, and must be
+  called from every control's handler.
 - **Filters travel as one object.** `state` *is* the filter set and is passed straight to
   `fetchData(f)` / `buildCriteria(f, yearOverride)` / `mockData(f)`. It used to be positional
   args, which hit five parameters and was collapsed; do not go back to adding parameters.

@@ -3247,6 +3247,7 @@
       rerender();
 
       markStale(false);
+      syncResetState();
       setStatus(
         CONFIG.useMockData
           ? "Showing sample data — wire Zoho Analytics in script.js § 4.2 and set CONFIG.useMockData = false."
@@ -3284,12 +3285,13 @@
   }
 
   /**
-   * Multi-select picklist. Returns a handle with setItems(), so the cascading
-   * people filters can refill their options without being rebuilt.
+   * Multi-select picklist: a button plus a popover of drawn checkboxes, with
+   * bulk Select all / Deselect all and a search box once the list is long
+   * enough to need one. Returns a handle exposing setItems() and sync(), so
+   * the people cascade can refill options and the master reset can re-label
+   * without either rebuilding the control.
    *
-   * An EMPTY selection means "all" — it is the unconstrained state, not an
-   * error. That keeps "no filter" and "every box ticked" from being two
-   * different ways of saying the same thing.
+   * An EMPTY selection means "all" — the unconstrained state, not an error.
    */
   function createPicklist(cfg) {
     var mount = document.getElementById(cfg.id);
@@ -3298,6 +3300,10 @@
     mount.className = "lp-pick";
     mount.textContent = "";
 
+    var items = cfg.items || [];
+    var query = "";
+
+    /* ---- trigger ---- */
     var btn = document.createElement("button");
     btn.type = "button";
     btn.className = "lp-pick__btn";
@@ -3307,96 +3313,178 @@
     var text = document.createElement("span");
     text.className = "lp-pick__text";
 
-    var caret = document.createElementNS(SVG_NS, "svg");
-    caret.setAttribute("class", "lp-pick__caret");
-    caret.setAttribute("viewBox", "0 0 10 10");
-    caret.setAttribute("aria-hidden", "true");
-    caret.appendChild(el("path", {
-      d: "M2 4l3 3 3-3", fill: "none", stroke: "currentColor",
-      "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round"
-    }));
+    var count = document.createElement("span");
+    count.className = "lp-pick__count";
+    count.hidden = true;
+
+    var caret = svgIcon("lp-pick__caret", "0 0 10 10", "M2 4l3 3 3-3");
 
     btn.appendChild(text);
+    btn.appendChild(count);
     btn.appendChild(caret);
 
+    /* ---- popover ---- */
     var menu = document.createElement("div");
     menu.className = "lp-pick__menu";
     menu.hidden = true;
 
-    mount.appendChild(btn);
-    mount.appendChild(menu);
+    var searchWrap, searchInput, actAll, actNone, list, foot, footCount, footClear;
 
-    var items = cfg.items || [];
+    function buildShell() {
+      menu.textContent = "";
+
+      if (items.length > 6) {
+        searchWrap = document.createElement("div");
+        searchWrap.className = "lp-pick__search";
+        searchWrap.appendChild(svgIcon("", "0 0 14 14",
+          "M6 1.5a4.5 4.5 0 1 0 2.9 7.95l3.1 3.1", true));
+
+        searchInput = document.createElement("input");
+        searchInput.type = "text";
+        searchInput.placeholder = cfg.searchLabel || "Search";
+        searchInput.value = query;
+        searchInput.addEventListener("input", function () {
+          query = searchInput.value;
+          renderList();
+        });
+        searchWrap.appendChild(searchInput);
+        menu.appendChild(searchWrap);
+      }
+
+      var actions = document.createElement("div");
+      actions.className = "lp-pick__actions";
+
+      actAll = document.createElement("button");
+      actAll.type = "button";
+      actAll.className = "lp-pick__act";
+      actAll.textContent = "Select all";
+      actAll.addEventListener("click", function () {
+        commit(visible().map(function (i) { return i.value; }));
+      });
+
+      actNone = document.createElement("button");
+      actNone.type = "button";
+      actNone.className = "lp-pick__act";
+      actNone.textContent = "Deselect all";
+      actNone.addEventListener("click", function () { commit([]); });
+
+      actions.appendChild(actAll);
+      actions.appendChild(actNone);
+      menu.appendChild(actions);
+
+      list = document.createElement("div");
+      list.className = "lp-pick__list";
+      menu.appendChild(list);
+
+      foot = document.createElement("div");
+      foot.className = "lp-pick__foot";
+      footCount = document.createElement("span");
+      footClear = document.createElement("span");
+      foot.appendChild(footCount);
+      foot.appendChild(footClear);
+      menu.appendChild(foot);
+
+      renderList();
+    }
 
     function selected() { return state[cfg.key] || []; }
 
-    function summarise() {
-      var sel = selected();
-      var active = sel.length > 0;
-      btn.setAttribute("data-active", String(active));
-
-      if (!active) { text.textContent = cfg.allLabel; return; }
-
-      var first = items.filter(function (i) { return i.value === sel[0]; })[0];
-      var name = first ? first.label : sel[0];
-      text.textContent = sel.length === 1 ? name : name + "  +" + (sel.length - 1);
-      btn.title = sel.map(function (v) {
-        var m = items.filter(function (i) { return i.value === v; })[0];
-        return m ? m.label : v;
-      }).join(", ");
+    function visible() {
+      var q = query.trim().toLowerCase();
+      if (!q) return items;
+      return items.filter(function (i) {
+        return i.label.toLowerCase().indexOf(q) !== -1;
+      });
     }
 
-    function render() {
-      menu.textContent = "";
+    function renderList() {
+      if (!list) return;
+      list.textContent = "";
 
-      var allRow = option(cfg.allLabel, selected().length === 0, function (on) {
-        if (on) commit([]);          // ticking All is how you clear a selection
-        else render();
-      });
-      menu.appendChild(allRow);
-      menu.appendChild(document.createElement("hr")).className = "lp-pick__sep";
-
-      if (!items.length) {
+      var vis = visible();
+      if (!vis.length) {
         var none = document.createElement("div");
         none.className = "lp-pick__empty";
-        none.textContent = cfg.emptyLabel || "Nothing to choose";
-        menu.appendChild(none);
-        return;
+        none.textContent = items.length
+          ? "No match"
+          : (cfg.emptyLabel || "Nothing to choose");
+        list.appendChild(none);
+      } else {
+        vis.forEach(function (item) {
+          list.appendChild(optionRow(item));
+        });
       }
 
-      items.forEach(function (item) {
-        var on = selected().indexOf(item.value) !== -1;
-        menu.appendChild(option(item.label, on, function (checked) {
-          var next = selected().slice();
-          var at = next.indexOf(item.value);
-          if (checked && at === -1) next.push(item.value);
-          if (!checked && at !== -1) next.splice(at, 1);
-          commit(next);
-        }));
+      var sel = selected().length;
+      footCount.textContent = sel
+        ? sel + " of " + items.length + " selected"
+        : "Showing all " + items.length;
+      footClear.textContent = "";
+
+      var allVisibleOn = vis.length && vis.every(function (i) {
+        return selected().indexOf(i.value) !== -1;
       });
+      actAll.disabled = !vis.length || allVisibleOn;
+      actNone.disabled = sel === 0;
     }
 
-    function option(label, checked, onToggle) {
+    function optionRow(item) {
+      var on = selected().indexOf(item.value) !== -1;
+
       var row = document.createElement("label");
       row.className = "lp-pick__opt";
+      row.setAttribute("data-on", String(on));
 
       var box = document.createElement("input");
       box.type = "checkbox";
-      box.checked = checked;
-      box.addEventListener("change", function () { onToggle(box.checked); });
+      box.checked = on;
+      box.addEventListener("change", function () {
+        var next = selected().slice();
+        var at = next.indexOf(item.value);
+        if (box.checked && at === -1) next.push(item.value);
+        if (!box.checked && at !== -1) next.splice(at, 1);
+        commit(next);
+      });
 
-      var span = document.createElement("span");
-      span.textContent = label;          // untrusted -> textContent
+      var drawn = document.createElement("span");
+      drawn.className = "lp-pick__check";
+      drawn.setAttribute("aria-hidden", "true");
+      drawn.appendChild(svgIcon("", "0 0 12 12", "M2.5 6.2l2.3 2.3L9.5 3.8"));
+
+      var label = document.createElement("span");
+      label.textContent = item.label;      // untrusted -> textContent
 
       row.appendChild(box);
-      row.appendChild(span);
+      row.appendChild(drawn);
+      row.appendChild(label);
       return row;
+    }
+
+    function summarise() {
+      var sel = selected();
+      btn.setAttribute("data-active", String(sel.length > 0));
+
+      if (!sel.length) {
+        text.textContent = cfg.allLabel;
+        count.hidden = true;
+        btn.removeAttribute("title");
+        return;
+      }
+
+      var labelOf = function (v) {
+        var m = items.filter(function (i) { return i.value === v; })[0];
+        return m ? m.label : v;
+      };
+      text.textContent = labelOf(sel[0]);
+      count.hidden = sel.length < 2;
+      count.textContent = String(sel.length);
+      btn.title = sel.map(labelOf).join(", ");
     }
 
     function commit(next) {
       state[cfg.key] = next;
       summarise();
-      render();
+      renderList();
       if (cfg.onChange) cfg.onChange(next);
     }
 
@@ -3404,12 +3492,16 @@
       closeAllPicklists();
       menu.hidden = false;
       btn.setAttribute("aria-expanded", "true");
-      render();
+      btn.setAttribute("data-open", "true");
+      query = "";
+      buildShell();
+      if (searchInput) searchInput.focus();
     }
 
     function close() {
       menu.hidden = true;
       btn.setAttribute("aria-expanded", "false");
+      btn.removeAttribute("data-open");
     }
 
     btn.addEventListener("click", function (e) {
@@ -3417,28 +3509,51 @@
       if (menu.hidden) open(); else close();
     });
 
+    /* Clicks inside the popover must not reach the document handler that
+       closes every picklist — otherwise ticking one box would shut the menu,
+       which defeats the point of a multi-select. */
+    menu.addEventListener("click", function (e) { e.stopPropagation(); });
+
     mount.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && !menu.hidden) { close(); btn.focus(); }
     });
 
+    mount.appendChild(btn);
+    mount.appendChild(menu);
+
     var handle = {
       close: close,
+      sync: summarise,
       setItems: function (next) {
         items = next || [];
-        /* drop selections that no longer exist rather than filtering on a
-           stale id the reader can no longer see or clear */
+        /* drop selections that no longer exist rather than filtering on an id
+           the reader can neither see nor clear */
         var pruned = selected().filter(function (v) {
           return items.some(function (i) { return i.value === v; });
         });
         if (pruned.length !== selected().length) state[cfg.key] = pruned;
         summarise();
-        if (!menu.hidden) render();
+        if (!menu.hidden) buildShell();
       }
     };
 
     PICKLISTS.push(handle);
     summarise();
     return handle;
+  }
+
+  /** Small inline icon helper for the control chrome. */
+  function svgIcon(cls, viewBox, path, noFillRule) {
+    var svg = document.createElementNS(SVG_NS, "svg");
+    if (cls) svg.setAttribute("class", cls);
+    svg.setAttribute("viewBox", viewBox);
+    svg.setAttribute("aria-hidden", "true");
+    svg.appendChild(el("path", {
+      d: path, fill: "none", stroke: "currentColor",
+      "stroke-width": noFillRule ? 1.4 : 1.8,
+      "stroke-linecap": "round", "stroke-linejoin": "round"
+    }));
+    return svg;
   }
 
   var PICKLISTS = [];
@@ -3448,6 +3563,57 @@
   }
 
   document.addEventListener("click", closeAllPicklists);
+
+  var DIM_PICKS = {};
+  var ANALYSIS_CHIPS = {};
+  var DIMENSION_KEYS = ["region", "bu", "service", "buHead", "manager", "rep"];
+
+  /** Is anything actually narrowed or overlaid right now? */
+  function anythingActive() {
+    if (state.scope !== "all") return true;
+    if (state.year !== new Date().getFullYear()) return true;
+    if (VIEW.compare || VIEW.target || VIEW.trend || VIEW.range) return true;
+    return DIMENSION_KEYS.some(function (k) { return (state[k] || []).length > 0; });
+  }
+
+  function syncResetState() {
+    var btn = document.getElementById("lp-reset");
+    if (btn) btn.disabled = !anythingActive();
+  }
+
+  /**
+   * Master reset: every filter, overlay and zoom back to the default view.
+   * Deliberately leaves each card's chosen chart form alone — that is the
+   * reader's display preference, not a filter hiding data from them.
+   */
+  function resetAll() {
+    state.year = new Date().getFullYear();
+    state.scope = "all";
+    DIMENSION_KEYS.forEach(function (k) { state[k] = []; });
+
+    VIEW.compare = false;
+    VIEW.target = false;
+    VIEW.trend = false;
+    VIEW.range = null;
+
+    var yearSel = document.getElementById("lp-year");
+    if (yearSel) yearSel.value = String(state.year);
+    var scopeSel = document.getElementById("lp-scope");
+    if (scopeSel) scopeSel.value = "all";
+
+    Object.keys(ANALYSIS_CHIPS).forEach(function (k) {
+      ANALYSIS_CHIPS[k].setAttribute("aria-pressed", "false");
+    });
+
+    closeAllPicklists();
+    Object.keys(DIM_PICKS).forEach(function (k) {
+      if (DIM_PICKS[k]) DIM_PICKS[k].sync();
+    });
+    populatePeopleSelects();
+
+    syncResetState();
+    load();
+  }
 
   function initFilters() {
     var yearSel = document.getElementById("lp-year");
@@ -3462,13 +3628,17 @@
 
     yearSel.addEventListener("change", function () {
       state.year = parseInt(yearSel.value, 10);
+      syncResetState();
       load();
     });
 
     document.getElementById("lp-scope").addEventListener("change", function (e) {
       state.scope = e.target.value;
+      syncResetState();
       load();
     });
+
+    document.getElementById("lp-reset").addEventListener("click", resetAll);
 
     /* Dimension picklists. Like every filter in this row they scope
        EVERYTHING below them, so a change refetches and every card re-renders
@@ -3477,12 +3647,13 @@
      ["lp-bu",      "bu",      CONFIG.businessUnits, "All BUs"],
      ["lp-service", "service", CONFIG.services,      "All services"]]
       .forEach(function (cfg) {
-        createPicklist({
+        DIM_PICKS[cfg[1]] = createPicklist({
           id: cfg[0],
           key: cfg[1],
           allLabel: cfg[3],
           items: (cfg[2] || []).map(function (n) { return { value: n, label: n }; }),
-          onChange: load
+          searchLabel: "Search " + cfg[1],
+          onChange: function () { syncResetState(); load(); }
         });
       });
 
@@ -3493,9 +3664,11 @@
       .forEach(function (pair) {
         var btn = document.getElementById(pair[0]);
         if (!btn) return;
+        ANALYSIS_CHIPS[pair[1]] = btn;
         btn.addEventListener("click", function () {
           VIEW[pair[1]] = !VIEW[pair[1]];
           btn.setAttribute("aria-pressed", String(VIEW[pair[1]]));
+          syncResetState();
           rerender();
         });
       });
@@ -3515,6 +3688,7 @@
         onChange: function () {
           cfg[3].forEach(function (k) { state[k] = []; });
           populatePeopleSelects();
+          syncResetState();
           load();
         }
       });

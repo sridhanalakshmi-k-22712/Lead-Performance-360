@@ -87,14 +87,27 @@
           Zoomed <span id="lp-zoom-label"></span> — reset
         </button>
 
-        <button class="lp-btn" id="lp-refresh" type="button">
-          <svg viewBox="0 0 16 16" aria-hidden="true" class="lp-btn__icon">
-            <path d="M13.5 8a5.5 5.5 0 1 1-1.61-3.89" fill="none" stroke="currentColor"
-                  stroke-width="1.5" stroke-linecap="round"/>
-            <path d="M13.5 2.5V5.5H10.5" fill="none" stroke="currentColor"
-                  stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <!-- Clears every filter back to its default. Disabled while nothing
+             is actually filtered, so it never looks live when it is inert. -->
+        <button class="lp-reset" id="lp-reset" type="button" disabled
+                title="Clear all filters and overlays">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.5 8a5.5 5.5 0 1 0 1.61-3.89" fill="none" stroke="currentColor"
+                  stroke-width="1.6" stroke-linecap="round"/>
+            <path d="M2.5 2.5v3h3" fill="none" stroke="currentColor"
+                  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          Refresh
+          Reset
+        </button>
+
+        <button class="lp-iconbtn" id="lp-refresh" type="button"
+                aria-label="Refresh data" title="Refresh data">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.61-3.89" fill="none" stroke="currentColor"
+                  stroke-width="1.7" stroke-linecap="round"/>
+            <path d="M13.5 2.5V5.5H10.5" fill="none" stroke="currentColor"
+                  stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </button>
       </div>
     </header>
