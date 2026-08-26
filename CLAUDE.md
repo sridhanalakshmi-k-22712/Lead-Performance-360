@@ -149,7 +149,7 @@ never a clause matching the literal string `"all"`.
   collapse to one owner set via `resolveOwnerEmails()` — union of the selected tier's
   subtrees, de-duplicated because two managers can share a report.
 - `createPicklist()` is the multi-select control (button + popover with search, Select all /
-  Deselect all, and drawn checkboxes over visually-hidden real ones so keyboard and screen
+  Clear all, and drawn checkboxes over visually-hidden real ones so keyboard and screen
   readers still work). A native `<select multiple>` needs ctrl-click and has nowhere to put
   bulk actions. The handle exposes `setItems()` — used by the people cascade to refill options
   without rebuilding, pruning selections that no longer exist rather than filtering on an id

@@ -3286,7 +3286,7 @@
 
   /**
    * Multi-select picklist: a button plus a popover of drawn checkboxes, with
-   * bulk Select all / Deselect all and a search box once the list is long
+   * bulk Select all / Clear all and a search box once the list is long
    * enough to need one. Returns a handle exposing setItems() and sync(), so
    * the people cascade can refill options and the master reset can re-label
    * without either rebuilding the control.
@@ -3365,7 +3365,7 @@
       actNone = document.createElement("button");
       actNone.type = "button";
       actNone.className = "lp-pick__act";
-      actNone.textContent = "Deselect all";
+      actNone.textContent = "Clear all";
       actNone.addEventListener("click", function () { commit([]); });
 
       actions.appendChild(actAll);
